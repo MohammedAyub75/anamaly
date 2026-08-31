@@ -40,6 +40,10 @@ TABLE_NAMES: tuple[str, ...] = (
     "fact_payroll_allowance",
     "fact_attendance_monthly",
     "fact_system_activity_monthly",
+    # Pass 2. Appended rather than inserted: a table stream is keyed by its
+    # position here, so adding to the end leaves every earlier stream alone.
+    "labels_anomaly",
+    "labels_confounder",
 )
 
 # Tables partitioned by `period`; everything else is single-partition.
@@ -95,6 +99,7 @@ class ScaleConfig:
     out_root: Path
     seed: int
     noise: bool = True
+    inject: bool = True
 
     @classmethod
     def build(
@@ -107,17 +112,19 @@ class ScaleConfig:
         reference_date: date = DEFAULT_REFERENCE_DATE,
         employees: int | None = None,
         noise: bool = True,
+        inject: bool = True,
     ) -> ScaleConfig:
         if scale not in SCALES:
             raise ValueError(f"unknown scale {scale!r}; expected one of {SCALES}")
         tier = population["scales"][scale]
         count = int(employees if employees is not None else tier["employees"])
         # A smaller-than-tier run (the determinism slice, the test suite) still
-        # needs enough org units to hang employees from, but never more units
-        # than employees or a section could not have members.
+        # needs enough org units to hang employees from, but a section has to
+        # stay a plausible size: D07 is a finding about a whole section, and a
+        # lake whose sections are four people has nothing for it to happen to.
         units = int(tier["org_units"])
         if employees is not None:
-            units = max(64, min(units, count // 4))
+            units = max(16, min(units, count // 12))
         return cls(
             scale=scale,
             employees=count,
@@ -127,6 +134,7 @@ class ScaleConfig:
             out_root=Path(out),
             seed=seed,
             noise=noise,
+            inject=inject,
         )
 
     # ------------------------------------------------------------------ paths

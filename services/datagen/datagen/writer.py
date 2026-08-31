@@ -59,6 +59,41 @@ def money_array(cents: Sequence[int] | np.ndarray, mask: np.ndarray | None = Non
     )
 
 
+def money_cents(array: pa.Array | pa.ChunkedArray) -> np.ndarray:
+    """The inverse of `money_array`: DECIMAL(12,2) back to int64 minor units.
+
+    Pass 2 reloads written Parquet, edits it and writes it back, so it needs the
+    same exact integer view of money the generator worked in. Arrow stores
+    decimal128 as little-endian 128-bit words, so the low word of each element
+    *is* the halalas -- no float, no Decimal object per cell.
+    """
+    if isinstance(array, pa.ChunkedArray):
+        array = array.combine_chunks()
+    words = np.frombuffer(array.buffers()[1], dtype=np.int64)
+    low = words[0::2]
+    return low[array.offset : array.offset + len(array)].copy()
+
+
+def write_arrow(arrow: pa.Table, path: Path) -> None:
+    """Write one Parquet part with the settings the whole lake is written at.
+
+    Shared with pass 2 so a rewritten part is byte-comparable with the part
+    pass 1 produced -- the determinism check compares file bytes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        arrow,
+        path,
+        compression=COMPRESSION,
+        compression_level=COMPRESSION_LEVEL,
+        row_group_size=CHUNK_ROWS,
+        version="2.6",
+        store_schema=True,
+        write_statistics=True,
+        coerce_timestamps="us",
+    )
+
+
 def _build_column(name: str, dtype: pa.DataType, values: Any, length: int) -> pa.Array:
     if isinstance(values, (pa.Array, pa.ChunkedArray)):
         array = values.combine_chunks() if isinstance(values, pa.ChunkedArray) else values
@@ -126,20 +161,9 @@ class LakeWriter:
     ) -> int:
         arrow = build_table(table, columns)
         path = self.cfg.part_path(table, chunk, period)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(
-            arrow,
-            path,
-            compression=COMPRESSION,
-            compression_level=COMPRESSION_LEVEL,
-            row_group_size=CHUNK_ROWS,
-            # Statistics and the writer version are part of the file bytes; both
-            # are pinned so two runs with the same seed compare byte-identical.
-            version="2.6",
-            store_schema=True,
-            write_statistics=True,
-            coerce_timestamps="us",
-        )
+        # Statistics and the writer version are part of the file bytes; both are
+        # pinned so two runs with the same seed compare byte-identical.
+        write_arrow(arrow, path)
         self.row_counts[table] += arrow.num_rows
         self._files.append(path)
         return arrow.num_rows
@@ -150,6 +174,8 @@ class LakeWriter:
         self,
         policy_digest: Mapping[str, str],
         generated_at: datetime | None = None,
+        injection: Mapping[str, Any] | None = None,
+        row_counts: Mapping[str, int] | None = None,
     ) -> dict[str, Any]:
         """The `manifest.json` payload; shape fixed by docs/DATA_DICTIONARY.md section 3."""
         stamp = generated_at or datetime.now(timezone.utc)
@@ -164,10 +190,13 @@ class LakeWriter:
             "reference_date": self.cfg.reference_date.isoformat(),
             "noise": self.cfg.noise,
             "generated_at": stamp.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "row_counts": {k: int(v) for k, v in sorted(self.row_counts.items())},
-            # Pass 2 (phase 2) fills this in; a clean population has nothing to
-            # declare, and the eval harness reads the zeroes as "not injected yet".
-            "injection": {
+            "row_counts": {
+                k: int(v)
+                for k, v in sorted((row_counts or self.row_counts).items())
+            },
+            # Pass 2 fills this in. A run with `--no-inject` leaves the zeroes,
+            # which the eval harness reads as "no ground truth in this lake".
+            "injection": dict(injection) if injection is not None else {
                 "target_anomaly_rate": 0.0,
                 "employees_with_anomaly": 0,
                 "by_code": {},
@@ -177,9 +206,13 @@ class LakeWriter:
         }
 
     def write_manifest(
-        self, policy_digest: Mapping[str, str], generated_at: datetime | None = None
+        self,
+        policy_digest: Mapping[str, str],
+        generated_at: datetime | None = None,
+        injection: Mapping[str, Any] | None = None,
+        row_counts: Mapping[str, int] | None = None,
     ) -> dict[str, Any]:
-        payload = self.manifest(policy_digest, generated_at)
+        payload = self.manifest(policy_digest, generated_at, injection, row_counts)
         self.cfg.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         self.cfg.manifest_path.write_text(
             json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8"

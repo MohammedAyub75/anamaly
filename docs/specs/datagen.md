@@ -22,16 +22,28 @@ paid allowance satisfies its eligibility clause; pass 2 then breaks specific cla
 records precisely what it broke. If pass 1 leaks a violation, that violation is an unlabelled
 anomaly and every recall figure downstream is wrong. **This is the phase-1 gate.**
 
-## Scope of phase 1 (this build)
+## Scope of phase 1
 
-Everything in pass 1. Do not inject anomalies. Do not write `labels_anomaly`. The injection
-framework may be stubbed with a module docstring saying phase 2 owns it, but no injector logic.
+Everything in pass 1. No anomaly injection, no `labels_anomaly`.
+
+## Scope of phase 2
+
+Everything in pass 2, and it runs **inside the same command**: `generate` writes the clean lake and
+then injects into it, so `python tasks.py datagen --scale 10k --seed 42` produces the dataset the
+detector is built against. `--no-inject` stops after pass 1 and writes empty label tables; it is a
+debugging flag, never a gate run.
+
+Pass 2 never regenerates. It loads the rows it intends to break, mutates them in Python and rewrites
+the affected Parquet parts, so every anomaly is an auditable delta from a population the phase-1
+gate has already certified clean. That is what makes the ground truth exact, and it is why the
+phase-1 gate can go on being run afterwards: its headline check becomes "no violation that the
+labels do not account for", which on an uninjected lake is the same assertion it always was.
 
 ## CLI
 
 ```
 python -m datagen generate --scale {10k|100k|1m} --seed INT [--out DIR] [--periods INT]
-                           [--reference-date YYYY-MM-DD] [--no-noise]
+                           [--reference-date YYYY-MM-DD] [--no-noise] [--no-inject]
 python -m datagen validate --scale {10k|100k|1m}    # re-run integrity checks on existing output
 python -m datagen summary  --scale {10k|100k|1m}    # print row counts + distributions, no data dump
 ```
@@ -46,6 +58,7 @@ Also reachable as `python tasks.py datagen --scale 10k --seed 42`, which is the 
 | `--periods` | `24` | Months of history |
 | `--reference-date` | `2026-08-31` | "Today" for the run. Never `datetime.now()` — that would break determinism. |
 | `--no-noise` | off | Skip realism noise. Debugging only; never used for a gate run. |
+| `--no-inject` | off | Stop after pass 1. Writes empty label tables. Debugging only. |
 | `--employees` | tier default | Generate a smaller slice than the tier. Used by the determinism check and the test suite; not part of the documented workflow. |
 
 Exit non-zero on any integrity failure. `summary` must print a compact table, never row data.
@@ -125,7 +138,14 @@ services/datagen/
     names.py           # bilingual Saudi/Arab/expat name pools
     identifiers.py     # national_id, iqama, IBAN (MOD-97), badge — all check-digit valid
     integrity.py       # the validation suite behind `validate` and the phase-1 gate
-    injection/         # PHASE 2 — empty package with a docstring in phase 1
+    injection/
+      model.py         # the edit set and the two label row types
+      context.py       # the working set: lake rows, as-at feature rows, guards, mutators
+      common.py        # candidate selection (`fill`) and the payment helpers
+      family_a.py      # A01-A12   family_b.py  B01-B07
+      family_c.py      # C01-C08   family_d.py  D01-D07
+      confounders.py   # the seven planted legitimate look-alikes
+      apply.py         # rewriting the affected Parquet parts
   tests/
 ```
 
@@ -284,9 +304,10 @@ more are owned by this service and carry what would otherwise be literals in Pyt
 | Pack | Holds |
 |---|---|
 | `policy/payroll.yaml` | GOSI rates and the contributory ceiling, the overtime multiplier and legal monthly maximum, the bonus month and its rate-by-rating table, retro and loan rates, the end-of-service settlement window |
+| `policy/injection.yaml` | Pass 2's dials: the per-code rate, severity, window and magnitude; the confounder mix; the collision guards; and `unowned_allowance_codes` |
 | `policy/population.yaml` | The distribution parameters: nationality mix by site class, grade floors at hard sites, the tenure curve, status mix, work-pattern/housing/transport correlations, job family by site class, career spacings, attendance and activity rates, and the realism-noise rates |
 
-All six are SHA-256 digested into `manifest.json`.
+All seven are SHA-256 digested into `manifest.json`.
 
 ## `manifest.json`
 
@@ -325,10 +346,13 @@ pass/fail table. Every check is a hard failure.
 - `gross` and `net` reconcile with their components to the cent, on every row.
 - `allowance_total` equals the sum of that employee-period's `fact_payroll_allowance` rows.
 
-**Zero policy violations — the headline check**
-- Evaluate every one of the 34 anomaly-code predicates against the clean dataset. **Every one must
-  return zero rows.** Report the per-code count in the gate table so a leak is visible by code, not
-  just as a total.
+**Zero unlabelled policy violations — the headline check**
+- Evaluate every one of the 34 anomaly-code predicates against the dataset. Each returns the
+  `(employee_id, period)` rows it finds; **every row must be accounted for** by a `labels_anomaly`
+  row for the same employee, code and period, or by a `labels_confounder` row whose `confounds_code`
+  is that code. On an uninjected lake the label tables are empty and this reduces to "every
+  predicate returns zero", which is what phase 1 asserted. Report per code, so a leak is visible as
+  "A05: 12" rather than as an unhelpful total.
 
 **Determinism**
 - Regenerate a 1,000-employee slice with the same seed and assert byte-identical Parquet.
@@ -346,10 +370,44 @@ pass/fail table. Every check is a hard failure.
 - `test_identifiers.py` — IBAN MOD-97 and national-id check digits, both directions.
 - `test_integrity.py` — the full suite at 1k scale.
 - `test_distributions.py` — nationality mix, grade pyramid and site skew within tolerance of target.
+- `test_injection.py` — every code at its floor; **every injected employee found by that code's own
+  predicate**, per code; nothing found that no label accounts for; confounders planted, unlabelled,
+  and below the deterministic rule they confound; the injected lake still reconciles to the cent.
 
-## Deliberate non-goals for phase 1
+## Pass 2 — how injection works
 
-- No anomaly injection, no `labels_anomaly` (phase 2).
+**One edit model.** Every injector goes through `injection/context.py`, which owns three things.
+
+*Arithmetic.* `set_allowances` and `set_payroll` recompute `allowance_total`, GOSI, `gross` and
+`net` exactly as `facts/payroll.py` did, so the integrity gate reconciles an injected row to the
+cent like a clean one. Money stays int64 halalas throughout, as in pass 1.
+
+*As-at state.* `feature_row(employee, period)` rebuilds the denormalised row the clauses are written
+against, from the lake rather than from the generator's in-memory career — pass 2 only ever sees
+what was written. That is what lets an injector ask the policy pack what an allowance *should* pay
+this employee in this month, which is how a family-A violation is paid at exactly its policy amount
+and so never doubles as A07.
+
+*Guards.* `guard_step` and `ratio_ok` refuse a mutation whose side effect would be a different code:
+a pay step big enough to read as a D06 change-point, an allowance load over B03's ceiling, an
+allowance appearing beside a manager change and so reading as D05. The thresholds are in
+`policy/injection.yaml` under `guards`. **An unlabelled collision is an unlabelled anomaly**, which
+is the one thing pass 2 must not produce, and the gate checks it per code.
+
+**Selection.** Each injector takes a candidate pool from SQL, walks it in a seeded stable order and
+*attempts* each candidate until its target count succeeds — attempting rather than assigning is what
+lets a guard veto a victim without the selection SQL having to encode the reasoning. Candidates are
+loaded in batches, because a pool is often thousands of employees.
+
+**Application.** `apply.py` rewrites only the Parquet parts that contain an edited row, through the
+same `build_table` the generator writes with, so the schema gate compares the injected lake against
+exactly the same contract.
+
+**Targets.** `max(min_instances, round(rate x employees))` per code. At 10k the floor lifts eleven
+of the rarer codes, so the realised rate (~3.0%) sits above the catalogue's headline 2.75%.
+
+## Deliberate non-goals for phase 2
+
 - No features, no detection, no scoring (phase 3+).
 - No Postgres. datagen writes Parquet and nothing else.
 - No 1m-scale tuning — correctness first at 10k; phase 7 owns scale-up. Do not sacrifice a clear

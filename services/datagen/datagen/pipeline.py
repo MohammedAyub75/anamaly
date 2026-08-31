@@ -43,6 +43,7 @@ class RunResult:
 
     manifest: dict[str, Any]
     seconds: float
+    injection_seconds: float = 0.0
 
 
 def generate(cfg: ScaleConfig, policy: DatagenPolicy | None = None) -> RunResult:
@@ -87,8 +88,38 @@ def generate(cfg: ScaleConfig, policy: DatagenPolicy | None = None) -> RunResult
             calendar_days, working_days, chunk, start, count, result,
         )
 
-    manifest = writer.write_manifest(policy.pack.digest)
-    return RunResult(manifest=manifest, seconds=time.perf_counter() - started)
+    # --- pass 2 ----------------------------------------------------------
+    # Injection runs over the lake pass 1 just wrote rather than inside the
+    # chunk loop: every anomaly is then a delta from a population the phase-1
+    # gate has certified clean, which is what makes the ground truth exact.
+    counts = dict(writer.row_counts)
+    payload: dict[str, Any] | None = None
+    elapsed = 0.0
+    if cfg.inject:
+        from .injection import inject
+
+        result = inject(cfg, policy, streams)
+        counts.update(result.row_counts)
+        payload = result.manifest_payload(
+            float(policy.pack.injection["target_anomaly_rate"])
+        )
+        elapsed = result.seconds
+    else:
+        for table in ("labels_anomaly", "labels_confounder"):
+            counts[table] = writer.write(table, _empty(table))
+
+    manifest = writer.write_manifest(
+        policy.pack.digest, injection=payload, row_counts=counts
+    )
+    return RunResult(manifest=manifest, seconds=time.perf_counter() - started,
+                     injection_seconds=elapsed)
+
+
+def _empty(table: str) -> dict[str, list]:
+    """An empty label table, so a `--no-inject` lake still has every table."""
+    from .schemas import SCHEMAS
+
+    return {field.name: [] for field in SCHEMAS[table]}
 
 
 def _write_chunk_facts(

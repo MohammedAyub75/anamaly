@@ -457,6 +457,147 @@ def verify_1() -> int:
     return gate.report()
 
 
+def verify_2() -> int:
+    """Phase-2 gate: the injected anomalies and the ground truth that records them.
+
+    The inverse of the phase-1 gate. Phase 1 asked whether the population was
+    clean; this asks whether every code is present at its floor, whether the
+    predicate that defines each code actually finds every employee the injector
+    claims to have broken, and whether anything at all is broken that the labels
+    do not account for. The phase-1 suite is re-run underneath, collapsed to a
+    single row unless something in it fails.
+    """
+    _add_service_paths()
+    from datagen.config import ScaleConfig
+    from datagen.integrity import (
+        anomaly_predicates,
+        connect,
+        found_count,
+        labelled_employees,
+        run,
+        unlabelled_count,
+    )
+    from datagen.policy import DatagenPolicy
+
+    policy = DatagenPolicy.load(ROOT / "policy")
+    cfg = ScaleConfig.build("10k", 42, policy.population, out=ROOT / "data" / "raw")
+    manifest = (json.loads(cfg.manifest_path.read_text(encoding="utf-8"))
+                if cfg.manifest_path.exists() else {})
+    if not manifest.get("injection", {}).get("by_code"):
+        from datagen.pipeline import generate
+
+        print(f"generating {cfg.scale} dataset with injection (seed {cfg.seed}) ...")
+        result = generate(cfg, policy)
+        manifest = result.manifest
+        print(f"generated in {result.seconds:.1f}s")
+
+    gate = Gate(2, PHASE_TITLES[2])
+    spec = policy.pack.injection
+    floor = int(spec["min_instances"])
+    by_code = manifest["injection"]["by_code"]
+    planted = manifest["injection"]["confounders"]
+    con = connect(cfg)
+    try:
+        codes = sorted(spec["codes"])
+        missing = [c for c in codes if by_code.get(c, 0) < floor]
+        gate.check("every code injected at its floor", not missing,
+                   f"{len(codes)} codes, at least {floor} each"
+                   if not missing else f"short={missing}")
+
+        employees = manifest["employee_count"]
+        carrying = manifest["injection"]["employees_with_anomaly"]
+        rate = carrying / employees if employees else 0
+        target = float(spec["target_anomaly_rate"])
+        # The floor lifts the realised rate above the catalogue's headline sum
+        # at 10k -- eleven codes are rarer than five in ten thousand.
+        gate.check("injection rate in range", target <= rate <= target * 1.5,
+                   f"{rate * 100:.2f}% of employees carry an anomaly "
+                   f"(catalogue {target * 100:.2f}%, floors lift it)")
+
+        counts = _label_counts(con)
+        gate.check("labels resolve to employees", counts["orphans"] == 0,
+                   f"{counts['labels']:,} label rows, {counts['confounders']:,} "
+                   "confounder rows, no orphans")
+        gate.check("label windows inside the run", counts["outside"] == 0,
+                   f"{cfg.period_from}..{cfg.period_to}"
+                   if not counts["outside"] else f"outside={counts['outside']}")
+        gate.check("severities in domain", counts["bad_severity"] == 0,
+                   "CRITICAL, HIGH, MEDIUM" if not counts["bad_severity"]
+                   else f"invalid={counts['bad_severity']}")
+        gate.check("injection params reproducible", counts["bad_json"] == 0,
+                   f"{counts['labels']:,} parameter sets parse")
+        gate.check("label counts match manifest", counts["by_code"] == by_code,
+                   f"{sum(by_code.values()):,} rows agree with manifest.injection")
+
+        types = sorted(spec["confounders"])
+        thin = [t for t in types if planted.get(t, 0) < floor]
+        gate.check("confounders planted", not thin,
+                   f"{len(types)} types, {sum(planted.values())} employees"
+                   if not thin else f"short={thin}")
+        gate.check("confounders are unlabelled", counts["confounded_and_labelled"] == 0,
+                   "no confounder carries an anomaly label"
+                   if not counts["confounded_and_labelled"]
+                   else f"overlap={counts['confounded_and_labelled']}")
+
+        for code, (label, sql) in anomaly_predicates(cfg, policy).items():
+            injected = by_code.get(code, 0)
+            detected = labelled_employees(con, code, sql)
+            leaked = unlabelled_count(con, code, sql)
+            total = found_count(con, sql)
+            gate.check(
+                f"{code} {label}",
+                detected == injected and leaked == 0 and injected >= floor,
+                f"{injected} injected, {detected} found, {leaked} unlabelled"
+                + (f", {total} rows" if total else ""),
+            )
+    finally:
+        con.close()
+
+    report = run(cfg, policy)
+    failed = [c for c in report.checks if not c.ok]
+    if failed:
+        for check in failed:
+            gate.check(f"phase-1: {check.name}", False, check.detail)
+    else:
+        gate.check("phase-1 integrity suite", True,
+                   f"{len(report.checks)}/{len(report.checks)} checks still pass")
+    return gate.report()
+
+
+def _label_counts(con) -> dict:
+    """Everything the label tables have to satisfy, in one pass each."""
+    scalar = con.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM labels_anomaly),
+          (SELECT count(*) FROM labels_confounder),
+          (SELECT count(*) FROM labels_anomaly l LEFT JOIN employee_master e
+             USING (employee_id) WHERE e.employee_id IS NULL)
+          + (SELECT count(*) FROM labels_confounder c LEFT JOIN employee_master e
+             USING (employee_id) WHERE e.employee_id IS NULL),
+          (SELECT count(*) FROM labels_anomaly l LEFT JOIN dim_calendar a
+             ON a.period = l.period_from LEFT JOIN dim_calendar b
+             ON b.period = l.period_to
+             WHERE a.period IS NULL OR b.period IS NULL OR l.period_to < l.period_from),
+          (SELECT count(*) FROM labels_anomaly WHERE injected_severity
+             NOT IN ('CRITICAL','HIGH','MEDIUM')),
+          (SELECT count(*) FROM labels_anomaly WHERE try_cast(
+             injection_params_json AS JSON) IS NULL),
+          (SELECT count(*) FROM labels_confounder c JOIN labels_anomaly l
+             USING (employee_id))
+        """
+    ).fetchone()
+    by_code = dict(con.execute(
+        "SELECT anomaly_code, count(*) FROM labels_anomaly GROUP BY 1 ORDER BY 1"
+    ).fetchall())
+    return {
+        "labels": scalar[0], "confounders": scalar[1], "orphans": scalar[2],
+        "outside": scalar[3], "bad_severity": scalar[4], "bad_json": scalar[5],
+        "confounded_and_labelled": scalar[6],
+        "by_code": {k: int(v) for k, v in by_code.items()},
+    }
+
+
 def verify_pending(phase: int) -> int:
     title = PHASE_TITLES.get(phase, "unknown phase")
     print(f"\nPhase {phase} gate — {title}")
@@ -471,6 +612,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return verify_0()
     if phase == 1:
         return verify_1()
+    if phase == 2:
+        return verify_2()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)

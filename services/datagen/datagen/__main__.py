@@ -50,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="'today' for the run; never the wall clock")
     generate.add_argument("--no-noise", action="store_true",
                           help="skip realism noise; debugging only, never for a gate run")
+    generate.add_argument("--no-inject", action="store_true",
+                          help="stop after pass 1; writes the clean population and "
+                               "empty label tables. Debugging only.")
     generate.add_argument("--employees", type=int, default=None,
                           help=argparse.SUPPRESS)  # slice override, used by the gate
 
@@ -72,6 +75,7 @@ def _config(args: argparse.Namespace, policy: DatagenPolicy) -> ScaleConfig:
         reference_date=getattr(args, "reference_date", DEFAULT_REFERENCE_DATE),
         employees=getattr(args, "employees", None),
         noise=not getattr(args, "no_noise", False),
+        inject=not getattr(args, "no_inject", False),
     )
 
 
@@ -89,6 +93,13 @@ def main(argv: list[str] | None = None) -> int:
               f"periods={cfg.period_from}..{cfg.period_to}")
         for table, rows in counts.items():
             print(f"  {table:<32} {rows:>12,}")
+        injected = result.manifest["injection"]
+        if injected["employees_with_anomaly"]:
+            print(f"  injected {sum(injected['by_code'].values()):,} anomalies across "
+                  f"{len(injected['by_code'])} codes into "
+                  f"{injected['employees_with_anomaly']:,} employees, plus "
+                  f"{sum(injected['confounders'].values()):,} confounders "
+                  f"({result.injection_seconds:.1f}s)")
         print(f"written to {cfg.lake} in {result.seconds:.1f}s")
         return 0
 

@@ -85,14 +85,21 @@ is expected at **100% precision and 100% recall** (phase-3 gate).
 - **Injection**: pay a legitimately-entitled allowance at 1.3×–2.5× the policy amount for that
   grade/site.
 - **Detection**: recompute the entitled amount from `amount_basis` and compare; tolerance 1 SAR.
+  **Only where the recomputed amount is above zero.** An allowance the employee has no claim to at
+  all recomputes to zero, and that is an eligibility breach with its own code (A01-A06, A09, A10);
+  counting it here as well would put two codes on one row and split its recall between them.
 - **Evidence**: expected vs actual amount, the basis used, grade, site tier.
 - **Actions**: correct to the policy amount; recover the difference; check for a payroll-master
   override.
 
 ### A08 — Grade outside the job code's permitted band
 **Severity** HIGH · **Rate** 0.07% · **Detector** L1
-- **Injection**: set `grade` outside `dim_job.min_grade..max_grade`.
-- **Detection**: direct comparison against `dim_job`.
+- **Injection**: move the **job code**, not the grade — a different post in the same job family,
+  with the same `safety_critical` status and no higher education minimum, whose permitted band
+  excludes the grade held. The equivalent mismatch, and the only form that leaves the salary band
+  and the entitlement set untouched: moving the grade instead would drag the band (B01/B02) and the
+  `grade_entitlements` gate along with it.
+- **Detection**: direct comparison against `dim_job`, over `fact_assignment_history`.
 - **Evidence**: grade, job code and title, permitted band, salary implication.
 - **Actions**: confirm with Compensation; regrade or reassign the job code.
 
@@ -157,7 +164,13 @@ Phase-4 gate: **recall ≥ 85%**.
 
 ### B03 — Allowance load far above the cohort norm
 **Severity** MEDIUM · **Rate** 0.12% · **Detector** L2
-- **Injection**: push `allowance_ratio` to 0.7–0.9 by stacking several legitimate-looking allowances.
+- **Injection**: push `allowance_ratio` **above `allowance_load.hard_ceiling_ratio`** (0.98–1.20) by
+  making the employee genuinely entitled to more — housed by allowance rather than in the camp,
+  family resident in the Kingdom, own transport — and paying the larger entitled set. Every
+  allowance in the stack passes its own clause; the total is the finding. The range is above the
+  ceiling rather than the 0.7–0.9 first written here because phase 1 clamps the clean population at
+  `clean_population_ratio_max` (0.88): an injection inside 0.7–0.9 would sit inside the clean
+  distribution and be indistinguishable from an ordinary offshore rotation worker.
 - **Detection**: robust z on `allowance_ratio` within cohort; ceiling from `allowance_load`.
 - **Evidence**: ratio, cohort median ratio, the contributing allowance breakdown.
 - **Actions**: review each allowance's eligibility individually — the total is the symptom.
@@ -203,8 +216,12 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
 
 ### C01 — IBAN shared across unrelated employees
 **Severity** CRITICAL · **Rate** 0.05% · **Detector** L3 graph
-- **Injection**: assign one IBAN to 2–5 employees in different org units with different surnames.
+- **Injection**: assign one IBAN to 2–3 employees in different org units, with different surnames
+  and different dates of birth.
 - **Detection**: connected components over `fact_bank_account`, over time, not just current rows.
+  Two exclusions, each of which is a *different* finding rather than a false positive: a couple who
+  each declare the other as their spouse (the planted confounder), and a pair sharing a date of
+  birth and a near-identical name, which is one person on the payroll twice — **C06**.
 - **Evidence**: the IBAN (masked), every employee on it, their org units, total monthly disbursement.
 - **Actions**: **hold payroll** on the account; verify identity documents; escalate to investigation.
 - **Confounder**: spousal shared accounts (`is_known_benign_share = true`, same surname, declared
@@ -247,8 +264,10 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
 
 ### C06 — Near-duplicate identity
 **Severity** HIGH · **Rate** 0.02% · **Detector** L3 graph
-- **Injection**: clone an employee with a fuzzed name (transposition, spacing, transliteration
-  variant), the same DOB, and the same IBAN or address.
+- **Injection**: take two existing employees and make the second a near-duplicate of the first —
+  the same date of birth, the same IBAN, and a name differing by a single transposition. Two real
+  records rather than a manufactured clone, so both pay streams, both careers and both attendance
+  histories are genuine.
 - **Detection**: blocking on DOB + IBAN, then Jaro-Winkler on `name_en_normalised` ≥ 0.90.
 - **Evidence**: both records side by side with the differing fields highlighted, both pay streams.
 - **Actions**: hold the newer record's payroll; verify documents; merge or terminate.
@@ -305,8 +324,11 @@ workhorse; the sequence autoencoder is only built if CUSUM proves insufficient (
 
 ### D05 — Allowance mix changing abruptly after a manager change
 **Severity** HIGH · **Rate** 0.06% · **Detector** L2 + L4
-- **Injection**: change `manager_id`, then within 1–2 periods add 2–3 allowances worth ≥ 20% of base,
-  **with no grade change** — that is what makes the allowances unexplained.
+- **Injection**: **the manager change is injected too.** Split the open assignment interval at a
+  mid-window month, hand the employee to their manager's own manager at the same grade, same post
+  and same unit, and 1–2 periods later add 2–3 allowances worth ≥ 20% of base with no grade change.
+  Pass 1's in-window manager changes all arrive with a promotion — transfers cluster early in a
+  career — and D05 deliberately ignores promotions, so the case has to be planted whole.
 - **Detection**: change-point in `allowance_total` within 2 periods of a manager change in
   `fact_assignment_history`, **excluding windows containing a grade change**. A promotion that
   crosses into a new `grade_entitlements` band adds allowances *by policy* and carries a promotion
@@ -315,14 +337,23 @@ workhorse; the sequence autoencoder is only built if CUSUM proves insufficient (
   absence of any grade movement.
 - **Actions**: review the new manager's other reports for the same pattern — this is a collusion
   precursor, and it is why **D07** exists.
-- **Confounder**: none needs planting. Managers change legitimately in the clean population — at a
+- **Confounder**: none needs planting, but note the shape of the denominator. Managers change
+  legitimately in the clean population — at a
   transfer, and whenever a promotion outgrows the previous manager — so roughly half the workforce
   carries a manager change inside the observation window. That is D05's precision denominator.
 
 ### D06 — Personal change-point vs own baseline
 **Severity** MEDIUM · **Rate** 0.05% · **Detector** L2 (CUSUM)
-- **Injection**: a sustained step change in `net` unexplained by any assignment or allowance record.
+- **Injection**: a sustained step in take-home pay from a mid-window month with no assignment record
+  within a month either side, built from allowance codes that no family-A rule polices (`SHIFT`,
+  `ON_CALL`, `SAFETY`, `SECURITY_CLEARANCE` and the rest of `unowned_allowance_codes` in
+  `policy/injection.yaml`), each paid at exactly its policy amount. Money appearing with nothing in
+  the record to account for it is the finding; paid as `REMOTE_SITE` it would be A01 instead.
 - **Detection**: CUSUM over the employee's own 24-month series; robust z against their own history.
+  Measured on the **standing** part of pay — base plus allowances, less GOSI and loan — and only
+  where **base pay itself did not move**: overtime, the bonus month and a retro correction are
+  variation a reviewer can already account for, and a salary that moved with no paperwork behind it
+  is B04's finding, not this one.
 - **Evidence**: the 24-month chart with the change-point marked, before/after means, magnitude.
 - **Actions**: reconcile against payroll instructions for that period.
 
@@ -330,8 +361,14 @@ workhorse; the sequence autoencoder is only built if CUSUM proves insufficient (
 **Severity** HIGH · **Rate** 0.03% (applied to whole sections, so it covers more employees than the
 rate suggests) · **Detector** L2 aggregate
 *The collusion signal — one person is an anomaly, a whole section moving together is a scheme.*
-- **Injection**: shift an entire section's allowance load 25–40% above the org norm over 3–6 months.
-- **Detection**: aggregate robust z at `org_unit_id` level against sibling units at the same level.
+- **Injection**: lift every member of one section by 45–75% of their own allowance load over the
+  last six months, introduced in three stages so no individual month is a personal change-point.
+  Sections are chosen where every member has room under B03's ceiling, and every member the
+  detector would put in the comparison — paid in both the baseline and the recent window — is
+  lifted and labelled, because a member left out would be flagged by the section's drift with
+  nothing of their own to explain it.
+- **Detection**: aggregate robust z at `org_unit_id` level against sibling units at the same level,
+  and against the unit's own earlier baseline over the employees present in both windows.
 - **Evidence**: the section, its members, the org-level comparison, the timeline of the drift.
 - **Actions**: audit the section as a unit, not employee by employee; review the section head.
 
@@ -351,6 +388,14 @@ evaluation is meaningless, because anything unusual would be a true positive.
 | `legit_final_settlement` | One month of `SEVERANCE` paid after `termination_date` | C04 precision |
 | `legit_rotation_stack` | Offshore rotation worker legitimately holding 5 allowances at ~0.6 allowance ratio | B03 precision |
 | `legit_retro_correction` | Two retro adjustments correcting a known payroll error, with a matching assignment record | D02 precision |
+
+Each type declares the code whose precision it exists to measure, in `policy/injection.yaml` and
+again in `labels_confounder.confounds_code`. A confounder is built to sit *below* the deterministic
+rule for that code and *above* the statistical norm: a specialist near the top of the band but
+inside it, a jump with its promotion row, a quiet role with real badge entries. Two are deliberately
+inside their rule's reach and are suppressed by an exclusion rather than by magnitude —
+`spousal_shared_iban` (C01 excludes a declared couple) and `legit_final_settlement` (C04 excludes a
+SEVERANCE-only month).
 
 Target: **~0.9% of the population** carries a confounder. The phase-2 gate asserts they exist and
 are unlabelled; the eval harness reports how many were incorrectly scored CRITICAL or HIGH.

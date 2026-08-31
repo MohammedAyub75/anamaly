@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# policy/injection.yaml — datagen pass 2: what gets injected, and how much
+#
+# Every number the injectors use lives here rather than in Python, because the
+# eval harness reports recall per code against these rates and a customer will
+# want to re-tune the mix without a code change (CLAUDE.md: config over code).
+#
+# `rate` is a share of the employee population; `min_instances` is the floor
+# that wins at small scales, because recall measured on n=1 is noise.
+#
+# Contract: docs/ANOMALY_CATALOG.md is authoritative for what each code MEANS.
+# This file only carries the dials.
+# ---------------------------------------------------------------------------
+version: 1
+
+target_anomaly_rate: 0.0275     # docs/ANOMALY_CATALOG.md, sum of the 34 rates
+min_instances: 5                # floor per code at any scale
+
+# Guards that keep one injected code from silently becoming another. Injection
+# is the only place in the build where two anomaly definitions can collide, and
+# an unlabelled collision is an unlabelled anomaly.
+guards:
+  # A pay step this size or smaller cannot reach D06's change-point threshold,
+  # so an entitlement violation never doubles as an unexplained change-point.
+  max_step_ratio_of_standing: 0.20
+  # Stay clear of the B03 hard ceiling (allowance_load.hard_ceiling_ratio).
+  max_allowance_ratio: 0.90
+  # Periods of clearance from a manager change, so an added allowance is not
+  # also a D05 collusion signal.
+  manager_change_clearance: 2
+
+codes:
+  A01: {rate: 0.0022, severity: HIGH,     window_months: [6, 24]}
+  A02: {rate: 0.0018, severity: HIGH,     window_months: [6, 24]}
+  A03: {rate: 0.0004, severity: HIGH,     window_months: [6, 24]}
+  A04: {rate: 0.0015, severity: MEDIUM,   window_months: [6, 24]}
+  A05: {rate: 0.0014, severity: HIGH,     window_months: [6, 24]}
+  A06: {rate: 0.0016, severity: MEDIUM,   window_months: [6, 24]}
+  A07: {rate: 0.0011, severity: MEDIUM,   window_months: [6, 24], amount_factor: [1.3, 2.5]}
+  A08: {rate: 0.0007, severity: HIGH}
+  A09: {rate: 0.0006, severity: HIGH,     window_months: [6, 24]}
+  A10: {rate: 0.0008, severity: MEDIUM,   window_months: [6, 24]}
+  A11: {rate: 0.0006, severity: CRITICAL, expired_months: [2, 14]}
+  A12: {rate: 0.0003, severity: MEDIUM,   overrun_months: [14, 30]}
+
+  B01: {rate: 0.0014, severity: HIGH,     band_factor: [1.06, 1.30]}
+  B02: {rate: 0.0016, severity: MEDIUM,   shortfall_pct: [5, 15]}
+  B03: {rate: 0.0012, severity: MEDIUM,   target_ratio: [0.98, 1.20]}
+  B04: {rate: 0.0009, severity: CRITICAL, jump_pct: [12, 40]}
+  B05: {rate: 0.0010, severity: HIGH,     overtime_hours: [120, 200], periods: [1, 3]}
+  B06: {rate: 0.0008, severity: MEDIUM,   bonus_factor: 2.0}
+  B07: {rate: 0.0006, severity: MEDIUM,   increments: [2, 3]}
+
+  C01: {rate: 0.0005, severity: CRITICAL, ring_size: [2, 3]}
+  C02: {rate: 0.0003, severity: CRITICAL, ring_size: [2, 2]}
+  C03: {rate: 0.0002, severity: CRITICAL}
+  C04: {rate: 0.0004, severity: CRITICAL, months_past: [1, 8]}
+  C05: {rate: 0.0002, severity: HIGH}
+  C06: {rate: 0.0002, severity: HIGH}
+  C07: {rate: 0.0003, severity: CRITICAL, expired_months: [2, 12]}
+  C08: {rate: 0.0001, severity: HIGH,     window_months: [3, 12]}
+
+  D01: {rate: 0.0007, severity: MEDIUM,   grade_drop: [3, 4]}
+  D02: {rate: 0.0009, severity: HIGH,     entries: [3, 6], pct_of_base: [0.05, 0.12]}
+  D03: {rate: 0.0010, severity: MEDIUM,   leave_days: [15, 20], overtime_hours: [40, 52]}
+  D04: {rate: 0.0008, severity: MEDIUM,   excess_days: [2, 5]}
+  D05: {rate: 0.0006, severity: HIGH,     step_ratio_of_base: [0.21, 0.30]}
+  D06: {rate: 0.0005, severity: MEDIUM,   step_ratio_of_standing: [0.28, 0.45]}
+  D07: {rate: 0.0003, severity: HIGH,     drift_months: 6, drift_ratio: [1.45, 1.75],
+        min_members: 9}
+
+# Allowance codes an injector may add without breaking a family-A clause that
+# some OTHER code already owns. Paying one of these to somebody who does not
+# qualify is money appearing with nothing to explain it -- which is what D05,
+# D06 and D07 are about -- rather than a specific entitlement breach.
+unowned_allowance_codes:
+  [SHIFT, ON_CALL, SAFETY, MEAL, UNIFORM, FIELD_MESSING, CERT_PREMIUM,
+   LANGUAGE, SECURITY_CLEARANCE, CAR]
+
+# Planted legitimate look-alikes (docs/ANOMALY_CATALOG.md section 5). These are
+# never labelled anomalies; they exist so the evaluation measures precision
+# against something that genuinely resembles the finding.
+confounders:
+  legit_high_earner:      {rate: 0.0016, confounds: B01, band_position: [0.93, 0.99]}
+  legit_salary_jump:      {rate: 0.0014, confounds: B04, jump_pct: [15, 30]}
+  spousal_shared_iban:    {rate: 0.0012, confounds: C01}
+  low_activity_role:      {rate: 0.0012, confounds: C03, activity_score: [0.03, 0.06]}
+  legit_final_settlement: {rate: 0.0012, confounds: C04}
+  legit_rotation_stack:   {rate: 0.0012, confounds: B03, target_ratio: [0.60, 0.80]}
+  legit_retro_correction: {rate: 0.0012, confounds: D02, entries: 2}

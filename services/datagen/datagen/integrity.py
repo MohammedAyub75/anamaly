@@ -192,7 +192,15 @@ def _education_case(column: str) -> str:
 
 
 def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tuple[str, str]]:
-    """`{code: (label, sql)}`; every query must return zero on a clean lake."""
+    """`{code: (label, sql)}`; each query yields the `(employee_id, period)` it finds.
+
+    Rows rather than a count, because pass 2 exists: the phase-1 gate asks how
+    many of these are *unlabelled*, and the phase-2 gate asks whether every
+    injected employee is among them. A bare count could answer neither.
+
+    `period` is NULL where the finding is about the employee rather than about a
+    month -- a duplicate identity, a grade outside its band, a manager cycle.
+    """
     pack = policy.pack
     band = policy.pack.band_policy
     load = policy.pack.allowance_load
@@ -212,75 +220,81 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
         JOIN employee_master e ON e.employee_id = a.employee_id
         JOIN dim_site st ON st.site_id = s.asat_site
     """
+    found = "SELECT a.employee_id, a.period FROM " + paid
 
     return {
         "A01": (
             "remote-site allowance at an ineligible site",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code = 'REMOTE_SITE' "
+            f"{found} WHERE a.allowance_code = 'REMOTE_SITE' "
             + "AND a.amount > 0 AND (NOT st.remote_allowance_eligible OR st.site_class "
             + "IN ('hq','office','medical','training'))",
         ),
         "A02": (
             "hardship allowance at a tier-0 site",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code = 'HARDSHIP' "
+            f"{found} WHERE a.allowance_code = 'HARDSHIP' "
             + "AND a.amount > 0 AND st.hardship_tier = 0",
         ),
         "A03": (
             "offshore allowance onshore",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code = 'OFFSHORE' "
+            f"{found} WHERE a.allowance_code = 'OFFSHORE' "
             + "AND a.amount > 0 AND st.site_class <> 'offshore'",
         ),
         "A04": (
             "family assistance with no dependents",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code IN "
+            f"{found} WHERE a.allowance_code IN "
             + "('SCHOOL_ASSIST','FAMILY') AND a.amount > 0 AND "
             + "(e.dependents_count = 0 OR e.dependents_in_kingdom = 0)",
         ),
         "A05": (
             "housing allowance while company-housed",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code = 'HOUSING' "
+            f"{found} WHERE a.allowance_code = 'HOUSING' "
             + "AND a.amount > 0 AND e.housing_type IN "
             + "('company_camp_bachelor','company_family_housing')",
         ),
         "A06": (
             "transport allowance on a company bus",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code IN ('TRANSPORT','FUEL') "
+            f"{found} WHERE a.allowance_code IN ('TRANSPORT','FUEL') "
             + "AND a.amount > 0 AND e.transport_mode = 'company_bus'",
         ),
         "A07": (
             "amount outside the policy table",
-            f"SELECT count(*) FROM {paid} WHERE abs(a.amount - ({expected})) > 1.00",
+            # Only where the allowance is payable at all: paying something the
+            # employee has no claim to is an eligibility breach with its own
+            # code, and counting it here as well would put two codes on one row.
+            f"{found} WHERE ({expected}) > 0 AND abs(a.amount - ({expected})) > 1.00",
         ),
         "A08": (
             "grade outside the job band",
-            "SELECT count(*) FROM fact_assignment_history h JOIN dim_job j "
+            "SELECT DISTINCT h.employee_id, NULL::INTEGER AS period "
+            + "FROM fact_assignment_history h JOIN dim_job j "
             + "USING (job_code) WHERE h.grade < j.min_grade OR h.grade > j.max_grade",
         ),
         "A09": (
             "nationality-restricted benefit misapplied",
-            f"SELECT (SELECT count(*) FROM {paid} WHERE a.amount > 0 AND "
+            f"{found} WHERE a.amount > 0 AND "
             + "((a.allowance_code = 'EXPAT_PREMIUM' AND e.nationality_class <> 'expat') "
-            + "OR (a.allowance_code = 'SAUDI_DEV_SCHEME' AND e.nationality_class <> 'saudi'))) "
-            + "+ (SELECT count(*) FROM employee_master e WHERE e.gosi_class <> "
-            + f"(CASE e.nationality_class {gosi_pairs} ELSE 'unknown' END))",
+            + "OR (a.allowance_code = 'SAUDI_DEV_SCHEME' AND e.nationality_class <> 'saudi')) "
+            + "UNION ALL SELECT e.employee_id, NULL::INTEGER FROM employee_master e "
+            + f"WHERE e.gosi_class <> (CASE e.nationality_class {gosi_pairs} ELSE 'unknown' END)",
         ),
         "A10": (
             "rotation allowance without a rotation pattern",
-            f"SELECT count(*) FROM {paid} WHERE a.allowance_code IN "
+            f"{found} WHERE a.allowance_code IN "
             + f"('ROTATION','TRAVEL_TIME') AND a.amount > 0 AND e.work_pattern NOT IN ({rotation})",
         ),
         "A11": (
             "qualification below the job minimum",
-            "SELECT (SELECT count(*) FROM employee_master e JOIN dim_job j USING (job_code) "
-            + f"WHERE {_education_case('e.education_level')} < {_education_case('j.min_education')}) "
-            + "+ (SELECT count(*) FROM employee_master e JOIN dim_job j USING (job_code) "
-            + "WHERE j.safety_critical AND ("
+            "SELECT e.employee_id, NULL::INTEGER AS period FROM employee_master e "
+            + "JOIN dim_job j USING (job_code) "
+            + f"WHERE {_education_case('e.education_level')} < {_education_case('j.min_education')} "
+            + "UNION ALL SELECT e.employee_id, NULL::INTEGER FROM employee_master e "
+            + "JOIN dim_job j USING (job_code) WHERE j.safety_critical AND ("
             + "len(j.required_certifications) > len(e.certifications) OR "
-            + f"len(list_filter(e.certifications, c -> c.expiry <= DATE '{last_period_end}')) > 0))",
+            + f"len(list_filter(e.certifications, c -> c.expiry <= DATE '{last_period_end}')) > 0)",
         ),
         "A12": (
             "time-limited allowance beyond its maximum",
-            f"SELECT count(*) FROM {paid} WHERE a.amount > 0 AND ("
+            f"{found} WHERE a.amount > 0 AND ("
             + "(a.allowance_code = 'ACTING_ROLE' AND (e.acting_role_since IS NULL OR "
             + "date_diff('month', e.acting_role_since, "
             + f"last_day(make_date(a.period // 100, a.period % 100, 1))) > {acting_max})) OR "
@@ -289,29 +303,32 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
         ),
         "B01": (
             "salary above the band maximum",
-            "SELECT count(*) FROM employee_master e JOIN dim_grade g "
-            + "ON g.grade = e.grade AND g.nationality_class = e.nationality_class "
+            "SELECT e.employee_id, NULL::INTEGER AS period FROM employee_master e "
+            + "JOIN dim_grade g ON g.grade = e.grade "
+            + "AND g.nationality_class = e.nationality_class "
             + f"WHERE e.base_salary > g.salary_max * {1 + float(band['overpayment_tolerance_pct']) / 100}",
         ),
         "B02": (
             "salary below the band minimum",
-            "SELECT count(*) FROM employee_master e JOIN dim_grade g "
-            + "ON g.grade = e.grade AND g.nationality_class = e.nationality_class "
+            "SELECT e.employee_id, NULL::INTEGER AS period FROM employee_master e "
+            + "JOIN dim_grade g ON g.grade = e.grade "
+            + "AND g.nationality_class = e.nationality_class "
             + f"WHERE e.base_salary < g.salary_min * {1 - float(band['underpayment_tolerance_pct']) / 100}",
         ),
         "B03": (
             "allowance load above the hard ceiling",
-            "SELECT (SELECT count(*) FROM employee_master WHERE allowance_ratio > "
-            + f"{load['hard_ceiling_ratio']}) + (SELECT count(*) FROM fact_payroll_monthly "
-            + f"WHERE base_pay > 0 AND allowance_total > base_pay * {load['hard_ceiling_ratio']})",
+            "SELECT employee_id, NULL::INTEGER AS period FROM employee_master "
+            + f"WHERE allowance_ratio > {load['hard_ceiling_ratio']} "
+            + "UNION ALL SELECT employee_id, period FROM fact_payroll_monthly "
+            + f"WHERE base_pay > 0 AND allowance_total > base_pay * {load['hard_ceiling_ratio']}",
         ),
         "B04": (
             "salary jump with no assignment record",
             "WITH steps AS (SELECT employee_id, period, base_pay, "
             + "lag(base_pay) OVER (PARTITION BY employee_id ORDER BY period) AS prior "
             + "FROM fact_payroll_monthly WHERE base_pay > 0) "
-            + "SELECT count(*) FROM steps s WHERE s.prior IS NOT NULL AND s.prior > 0 "
-            + f"AND abs(s.base_pay - s.prior) > s.prior * {B04_JUMP_PCT / 100} "
+            + "SELECT s.employee_id, s.period FROM steps s WHERE s.prior IS NOT NULL "
+            + f"AND s.prior > 0 AND abs(s.base_pay - s.prior) > s.prior * {B04_JUMP_PCT / 100} "
             + "AND NOT EXISTS (SELECT 1 FROM fact_assignment_history h "
             + "WHERE h.employee_id = s.employee_id AND h.effective_from BETWEEN "
             + "make_date(s.period // 100, s.period % 100, 1) - INTERVAL 1 MONTH AND "
@@ -319,15 +336,17 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
         ),
         "B05": (
             "overtime beyond base pay or the legal maximum",
-            "SELECT count(*) FROM fact_payroll_monthly WHERE overtime_pay > base_pay "
+            "SELECT employee_id, period FROM fact_payroll_monthly "
+            + "WHERE overtime_pay > base_pay "
             + f"OR overtime_hours > {overtime['legal_monthly_max_hours']}",
         ),
         "B06": (
             "top-decile bonus on a bottom rating",
             "WITH cut AS (SELECT quantile_cont(bonus, 0.9) AS threshold "
             + "FROM fact_payroll_monthly WHERE bonus > 0) "
-            + "SELECT count(*) FROM fact_payroll_monthly p JOIN employee_master e "
-            + "USING (employee_id), cut WHERE p.bonus > 0 AND p.bonus >= cut.threshold "
+            + "SELECT p.employee_id, p.period FROM fact_payroll_monthly p "
+            + "JOIN employee_master e USING (employee_id), cut "
+            + "WHERE p.bonus > 0 AND p.bonus >= cut.threshold "
             + "AND coalesce(e.performance_rating_y1, 3) <= 2 "
             + "AND coalesce(e.performance_rating_y2, 3) <= 2 "
             + "AND coalesce(e.performance_rating_y3, 3) <= 2",
@@ -336,21 +355,41 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
             "increments above the policy frequency",
             "WITH inc AS (SELECT employee_id, effective_from FROM fact_assignment_history "
             + "WHERE change_reason = 'increment') "
-            + "SELECT count(*) FROM inc a JOIN inc b ON a.employee_id = b.employee_id "
+            + "SELECT DISTINCT a.employee_id, NULL::INTEGER AS period FROM inc a "
+            + "JOIN inc b ON a.employee_id = b.employee_id "
             + "AND b.effective_from > a.effective_from AND b.effective_from < "
             + "a.effective_from + INTERVAL 12 MONTH",
         ),
         "C01": (
             "IBAN shared across employees",
-            "SELECT count(*) FROM (SELECT iban FROM fact_bank_account "
-            + "GROUP BY iban HAVING count(DISTINCT employee_id) > 1)",
+            # A declared married couple sharing a family account is legitimate,
+            # and one person on the payroll twice is C06 -- a different finding
+            # with a different remedy. What is left is what C01 means: unrelated
+            # employees paid into one account.
+            "WITH shared AS (SELECT iban FROM fact_bank_account "
+            + "GROUP BY iban HAVING count(DISTINCT employee_id) > 1), "
+            + "pairs AS (SELECT DISTINCT l.employee_id AS left_id, r.employee_id AS right_id "
+            + "FROM fact_bank_account l JOIN fact_bank_account r "
+            + "ON l.iban = r.iban AND l.employee_id < r.employee_id "
+            + "JOIN shared ON shared.iban = l.iban), "
+            + "unrelated AS (SELECT p.* FROM pairs p "
+            + "JOIN employee_master a ON a.employee_id = p.left_id "
+            + "JOIN employee_master b ON b.employee_id = p.right_id "
+            + "WHERE NOT (a.spouse_employee_id IS NOT DISTINCT FROM b.employee_id "
+            + "AND b.spouse_employee_id IS NOT DISTINCT FROM a.employee_id) "
+            + "AND NOT (a.dob = b.dob AND jaro_winkler_similarity("
+            + f"a.name_en_normalised, b.name_en_normalised) >= {C06_NAME_SIMILARITY})) "
+            + "SELECT left_id AS employee_id, NULL::INTEGER AS period FROM unrelated "
+            + "UNION ALL SELECT right_id, NULL::INTEGER FROM unrelated",
         ),
         "C02": (
             "duplicate national id or iqama",
-            "SELECT (SELECT count(*) FROM (SELECT national_id FROM employee_master "
-            + "WHERE national_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1)) "
-            + "+ (SELECT count(*) FROM (SELECT iqama_no FROM employee_master "
-            + "WHERE iqama_no IS NOT NULL GROUP BY 1 HAVING count(*) > 1))",
+            "SELECT e.employee_id, NULL::INTEGER AS period FROM employee_master e "
+            + "JOIN (SELECT national_id AS id FROM employee_master "
+            + "WHERE national_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1 "
+            + "UNION ALL SELECT iqama_no FROM employee_master "
+            + "WHERE iqama_no IS NOT NULL GROUP BY 1 HAVING count(*) > 1) d "
+            + "ON d.id = e.national_id OR d.id = e.iqama_no",
         ),
         "C03": (
             "ghost employee",
@@ -358,12 +397,14 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
             + "FROM fact_system_activity_monthly a JOIN fact_payroll_monthly p "
             + "USING (employee_id, period) "
             + f"WHERE a.activity_score < {C03_DORMANT_SCORE} AND p.paid_flag GROUP BY 1) "
-            + f"SELECT count(*) FROM dormant WHERE quiet >= {C03_DORMANT_PERIODS}",
+            + "SELECT employee_id, NULL::INTEGER AS period FROM dormant "
+            + f"WHERE quiet >= {C03_DORMANT_PERIODS}",
         ),
         "C04": (
             "terminated employee still on payroll",
-            "SELECT count(*) FROM fact_payroll_monthly p JOIN employee_master e "
-            + "USING (employee_id) WHERE e.termination_date IS NOT NULL AND p.paid_flag "
+            "SELECT p.employee_id, p.period FROM fact_payroll_monthly p "
+            + "JOIN employee_master e USING (employee_id) "
+            + "WHERE e.termination_date IS NOT NULL AND p.paid_flag "
             + "AND p.period > (year(e.termination_date) * 100 + month(e.termination_date)) "
             + "AND (p.base_pay > 0 OR EXISTS (SELECT 1 FROM fact_payroll_allowance a "
             + "WHERE a.employee_id = p.employee_id AND a.period = p.period "
@@ -371,60 +412,65 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
         ),
         "C05": (
             "self-approval or a manager cycle",
-            "SELECT (SELECT count(*) FROM fact_assignment_history "
-            + "WHERE approved_by = employee_id) + "
-            + "(WITH RECURSIVE walk(root, node, depth) AS ("
+            "SELECT DISTINCT employee_id, NULL::INTEGER AS period "
+            + "FROM fact_assignment_history WHERE approved_by = employee_id "
+            + "UNION ALL (WITH RECURSIVE walk(root, node, depth) AS ("
             + "SELECT employee_id, manager_id, 1 FROM employee_master "
             + "WHERE manager_id IS NOT NULL UNION ALL "
             + "SELECT w.root, e.manager_id, w.depth + 1 FROM walk w "
             + "JOIN employee_master e ON e.employee_id = w.node "
             + "WHERE w.node IS NOT NULL AND w.node <> w.root AND w.depth < 30) "
-            + "SELECT count(*) FROM walk WHERE node = root)",
+            + "SELECT DISTINCT root, NULL::INTEGER FROM walk WHERE node = root)",
         ),
         "C06": (
             "near-duplicate identity",
-            "SELECT count(*) FROM employee_master a JOIN employee_master b "
+            "WITH twins AS (SELECT a.employee_id AS left_id, b.employee_id AS right_id "
+            + "FROM employee_master a JOIN employee_master b "
             + "ON a.employee_id < b.employee_id AND a.dob = b.dob "
             + "AND (a.iban = b.iban OR a.national_id = b.national_id "
             + "OR a.iqama_no = b.iqama_no) "
             + "WHERE jaro_winkler_similarity(a.name_en_normalised, b.name_en_normalised) "
-            + f">= {C06_NAME_SIMILARITY}",
+            + f">= {C06_NAME_SIMILARITY}) "
+            + "SELECT left_id AS employee_id, NULL::INTEGER AS period FROM twins "
+            + "UNION ALL SELECT right_id, NULL::INTEGER FROM twins",
         ),
         "C07": (
             "active payroll with an expired iqama",
-            "SELECT count(*) FROM fact_payroll_monthly p JOIN employee_master e "
-            + "USING (employee_id) WHERE e.iqama_expiry IS NOT NULL AND e.status = 'active' "
+            "SELECT p.employee_id, p.period FROM fact_payroll_monthly p "
+            + "JOIN employee_master e USING (employee_id) "
+            + "WHERE e.iqama_expiry IS NOT NULL AND e.status = 'active' "
             + "AND p.paid_flag AND e.iqama_expiry < "
             + "last_day(make_date(p.period // 100, p.period % 100, 1))",
         ),
         "C08": (
             "payroll charged to a foreign cost centre",
-            "SELECT count(*) FROM asat s JOIN dim_org_unit o "
+            "SELECT s.employee_id, s.period FROM asat s JOIN dim_org_unit o "
             + "ON o.org_unit_id = s.asat_org WHERE s.paid_cost_center <> o.cost_center",
         ),
         "D01": (
             "promotion velocity outlier",
             "WITH g AS (SELECT employee_id, effective_from, grade FROM fact_assignment_history) "
-            + "SELECT count(*) FROM g a JOIN g b ON a.employee_id = b.employee_id "
+            + "SELECT DISTINCT a.employee_id, NULL::INTEGER AS period FROM g a "
+            + "JOIN g b ON a.employee_id = b.employee_id "
             + "AND b.effective_from > a.effective_from AND b.effective_from <= "
             + "a.effective_from + INTERVAL 24 MONTH "
             + f"WHERE b.grade - a.grade > {int(band['max_grade_jump_per_24m'])}",
         ),
         "D02": (
             "repeated retroactive adjustments",
-            "SELECT count(*) FROM (SELECT employee_id FROM fact_payroll_monthly "
-            + f"WHERE retro_adjustment > 0 GROUP BY 1 HAVING count(*) >= {D02_RETRO_COUNT})",
+            "SELECT employee_id, NULL::INTEGER AS period FROM fact_payroll_monthly "
+            + f"WHERE retro_adjustment > 0 GROUP BY 1 HAVING count(*) >= {D02_RETRO_COUNT}",
         ),
         "D03": (
             "leave and overtime in the same period",
-            "SELECT count(*) FROM fact_attendance_monthly "
+            "SELECT employee_id, period FROM fact_attendance_monthly "
             + f"WHERE days_leave >= {D03_LEAVE_DAYS} AND overtime_hours >= {D03_OVERTIME_HOURS}",
         ),
         "D04": (
             "attendance beyond the physical maximum",
-            "SELECT count(*) FROM fact_attendance_monthly a JOIN dim_calendar c "
-            + "USING (period) WHERE a.days_worked + a.days_leave + a.absence_days "
-            + "> c.calendar_days",
+            "SELECT a.employee_id, a.period FROM fact_attendance_monthly a "
+            + "JOIN dim_calendar c USING (period) WHERE a.days_worked + a.days_leave "
+            + "+ a.absence_days > c.calendar_days",
         ),
         "D05": (
             "allowance step after a manager change",
@@ -440,7 +486,8 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
             + "step AS (SELECT employee_id, period, base_pay, allowance_total, "
             + "lag(allowance_total) OVER (PARTITION BY employee_id ORDER BY period) AS prior "
             + "FROM fact_payroll_monthly) "
-            + "SELECT count(*) FROM step s JOIN moves m ON m.employee_id = s.employee_id "
+            + "SELECT DISTINCT s.employee_id, s.period FROM step s "
+            + "JOIN moves m ON m.employee_id = s.employee_id "
             + "AND m.prior_manager IS NOT NULL "
             + "AND m.manager_id IS DISTINCT FROM m.prior_manager "
             + "AND m.grade = m.prior_grade "
@@ -459,14 +506,19 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
             # Measured on the standing part of net pay -- base plus allowances,
             # less the standing deductions. Overtime, the bonus month, a retro
             # correction and an absence deduction are all *explained* variation
-            # that a reviewer can already account for; CUSUM against an employee
-            # own baseline is looking for a step that nothing accounts for.
+            # that a reviewer can already account for.
+            #
+            # A month where base pay itself moved is excluded for the same
+            # reason: a salary that changed is a visible cause, and a salary that
+            # changed with no paperwork behind it is B04's finding, not this one.
             "WITH step AS (SELECT employee_id, period, base_pay, "
+            + "lag(base_pay) OVER (PARTITION BY employee_id ORDER BY period) AS prior_base, "
             + "base_pay + allowance_total - gosi_employee - loan_deduction AS standing, "
             + "lag(base_pay + allowance_total - gosi_employee - loan_deduction) "
             + "OVER (PARTITION BY employee_id ORDER BY period) AS prior "
             + "FROM fact_payroll_monthly WHERE base_pay > 0) "
-            + "SELECT count(*) FROM step s WHERE s.prior IS NOT NULL AND s.prior > 0 "
+            + "SELECT s.employee_id, s.period FROM step s WHERE s.prior IS NOT NULL "
+            + "AND s.prior > 0 AND s.base_pay = s.prior_base "
             + f"AND abs(s.standing - s.prior) > s.prior * {D06_NET_STEP} "
             + "AND NOT EXISTS (SELECT 1 FROM fact_assignment_history h "
             + "WHERE h.employee_id = s.employee_id AND h.effective_from BETWEEN "
@@ -475,10 +527,10 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
         ),
         "D07": (
             "section-wide allowance drift",
-            # Compared against the unit own earlier baseline, over the
+            # Compared against the unit's own earlier baseline, over the
             # employees present in BOTH windows, and on allowance load as a
-            # share of base. A raw monthly total would drift whenever the
-            # section hires or loses somebody, which is turnover, not a scheme.
+            # share of base. A raw monthly total drifts whenever the section
+            # hires or loses somebody, which is turnover, not a scheme.
             "WITH ranked AS (SELECT period, row_number() OVER (ORDER BY period) AS rn, "
             + "count(*) OVER () AS total FROM dim_calendar), "
             + "load AS (SELECT e.org_unit_id, p.employee_id, r.rn, r.total, "
@@ -494,10 +546,58 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
             + "avg(t.ratio) FILTER (WHERE t.recent) AS recent_ratio, "
             + "count(DISTINCT t.employee_id) AS members "
             + "FROM tagged t JOIN stable s USING (org_unit_id, employee_id) GROUP BY 1) "
-            + f"SELECT count(*) FROM unit WHERE members >= {D07_MIN_MEMBERS} "
-            + f"AND base_ratio > 0 AND recent_ratio > base_ratio * {D07_DRIFT}",
+            + "SELECT DISTINCT s.employee_id, NULL::INTEGER AS period FROM stable s "
+            + f"JOIN unit u USING (org_unit_id) WHERE u.members >= {D07_MIN_MEMBERS} "
+            + f"AND u.base_ratio > 0 AND u.recent_ratio > u.base_ratio * {D07_DRIFT}",
         ),
     }
+
+
+def found_count(con: duckdb.DuckDBPyConnection, sql: str) -> int:
+    """How many rows a predicate finds, labelled or not."""
+    return _count(con, f"SELECT count(*) FROM ({sql}) hits")
+
+
+def unlabelled_count(con: duckdb.DuckDBPyConnection, code: str, sql: str) -> int:
+    """Predicate hits that no ground-truth row accounts for.
+
+    This is the invariant both gates rest on. Before pass 2 the label tables are
+    empty and it reduces to "the clean population contains no policy violation
+    at all", which is what phase 1 asserted. After pass 2 it says the stronger
+    thing: every violation in the lake is one pass 2 wrote down, either as an
+    injected anomaly or as a planted legitimate look-alike.
+    """
+    return _count(
+        con,
+        f"SELECT count(*) FROM ({sql}) hits WHERE NOT EXISTS ("
+        + "SELECT 1 FROM labels_anomaly l WHERE l.employee_id = hits.employee_id "
+        + f"AND l.anomaly_code = '{code}' AND (hits.period IS NULL "
+        + "OR hits.period BETWEEN l.period_from AND l.period_to)) "
+        + "AND NOT EXISTS (SELECT 1 FROM labels_confounder c "
+        + f"WHERE c.employee_id = hits.employee_id AND c.confounds_code = '{code}')",
+    )
+
+
+def labelled_employees(con: duckdb.DuckDBPyConnection, code: str, sql: str) -> int:
+    """Injected employees this predicate actually finds -- recall against truth."""
+    return _count(
+        con,
+        "SELECT count(*) FROM (SELECT employee_id FROM labels_anomaly "
+        + f"WHERE anomaly_code = '{code}') l WHERE EXISTS ("
+        + f"SELECT 1 FROM ({sql}) hits WHERE hits.employee_id = l.employee_id)",
+    )
+
+
+def label_filter(code: str, column: str = "e.employee_id") -> str:
+    """SQL excluding employees deliberately injected with `code`.
+
+    A handful of the domain rules police exactly what an anomaly code breaks --
+    a salary inside its band is B01/B02, a grade inside its job band is A08, a
+    month with more days than it has is D04. Those rules stay absolute for the
+    rest of the population and defer to the ground truth for the injected rows.
+    """
+    return (f"NOT EXISTS (SELECT 1 FROM labels_anomaly l WHERE l.employee_id = {column} "
+            + f"AND l.anomaly_code IN ({', '.join(repr(c) for c in code.split(','))}))")
 
 
 # --------------------------------------------------------------------------
@@ -768,12 +868,18 @@ def _check_domain(
         + "WHERE dependents_in_kingdom > dependents_count",
         "attendance_days": "SELECT count(*) FROM fact_attendance_monthly a "
         + "JOIN dim_calendar c USING (period) "
-        + "WHERE a.days_worked + a.days_leave + a.absence_days > c.calendar_days",
+        + "WHERE a.days_worked + a.days_leave + a.absence_days > c.calendar_days "
+        + f"AND {label_filter('D04', 'a.employee_id')}",
+        # Three of these rules police exactly what an anomaly code breaks, so
+        # they hold for the population and defer to the ground truth for the
+        # rows pass 2 broke on purpose.
         "grade_in_job_band": "SELECT count(*) FROM employee_master e JOIN dim_job j "
-        + "USING (job_code) WHERE e.grade < j.min_grade OR e.grade > j.max_grade",
+        + "USING (job_code) WHERE (e.grade < j.min_grade OR e.grade > j.max_grade) "
+        + f"AND {label_filter('A08')}",
         "salary_in_band": "SELECT count(*) FROM employee_master e JOIN dim_grade g "
         + "ON g.grade = e.grade AND g.nationality_class = e.nationality_class "
-        + "WHERE e.base_salary < g.salary_min OR e.base_salary > g.salary_max",
+        + "WHERE (e.base_salary < g.salary_min OR e.base_salary > g.salary_max) "
+        + f"AND {label_filter('B01,B02')}",
         "termination_consistency": "SELECT count(*) FROM employee_master "
         + "WHERE (status = 'terminated') <> (termination_date IS NOT NULL)",
         "bus_route_consistency": "SELECT count(*) FROM employee_master "
@@ -860,14 +966,20 @@ def _check_anomaly_predicates(
     policy: DatagenPolicy,
     report: Report,
 ) -> None:
-    """The headline check: all 34 codes, each reported separately."""
+    """The headline check: all 34 codes, each reported separately.
+
+    What must be zero is the *unlabelled* count. On a clean lake the label
+    tables are empty and that is the same assertion phase 1 made; on an injected
+    one it says every violation present is one pass 2 wrote down.
+    """
     for code, (label, sql) in anomaly_predicates(cfg, policy).items():
         try:
-            found = _count(con, sql)
+            leaked = unlabelled_count(con, code, sql)
         except duckdb.Error as exc:  # pragma: no cover - surfaces a broken predicate
             report.add(f"{code} {label}", False, f"query failed: {exc}")
             continue
-        report.add(f"{code} {label}", found == 0, "0" if not found else f"{found} LEAKED")
+        report.add(f"{code} {label}", leaked == 0,
+                   "0 unlabelled" if not leaked else f"{leaked} UNLABELLED")
 
 
 def _check_determinism(cfg: ScaleConfig, policy: DatagenPolicy, report: Report) -> None:

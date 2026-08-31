@@ -323,6 +323,44 @@ FACT_SYSTEM_ACTIVITY_MONTHLY = pa.schema(
     ]
 )
 
+# --------------------------------------------------------------------------
+# Ground truth -- written by pass 2 only, and never read by a detector.
+# --------------------------------------------------------------------------
+
+LABELS_ANOMALY = pa.schema(
+    [
+        ("employee_id", pa.string()),
+        ("anomaly_code", pa.string()),
+        ("family", pa.string()),
+        ("period_from", pa.int32()),
+        ("period_to", pa.int32()),
+        ("injected_severity", pa.string()),
+        ("injection_params_json", pa.string()),
+        ("human_description", pa.string()),
+        ("work_site_id", pa.string()),
+        ("region_code", pa.string()),
+        ("expected_monthly_impact", MONEY),
+    ]
+)
+
+# The same shape, with `anomaly_code` replaced by `confounder_type` and the
+# severity replaced by the code whose precision this plant is here to measure.
+# A confounder is legitimate, so it has no severity of its own.
+LABELS_CONFOUNDER = pa.schema(
+    [
+        ("employee_id", pa.string()),
+        ("confounder_type", pa.string()),
+        ("confounds_code", pa.string()),
+        ("period_from", pa.int32()),
+        ("period_to", pa.int32()),
+        ("injection_params_json", pa.string()),
+        ("human_description", pa.string()),
+        ("work_site_id", pa.string()),
+        ("region_code", pa.string()),
+        ("expected_monthly_impact", MONEY),
+    ]
+)
+
 SCHEMAS: dict[str, pa.Schema] = {
     "dim_region": DIM_REGION,
     "dim_site": DIM_SITE,
@@ -338,4 +376,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     "fact_attendance_monthly": FACT_ATTENDANCE_MONTHLY,
     "fact_bank_account": FACT_BANK_ACCOUNT,
     "fact_system_activity_monthly": FACT_SYSTEM_ACTIVITY_MONTHLY,
+    "labels_anomaly": LABELS_ANOMALY,
+    "labels_confounder": LABELS_CONFOUNDER,
 }

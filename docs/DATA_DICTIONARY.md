@@ -240,7 +240,7 @@ Materialised from `policy/allowance_rules.yaml`.
 | `payment_method` | ENUM | `bank_transfer`, `cash`, `cheque` | Non-transfer at scale is itself suspicious. |
 | `payroll_hold_flag` | BOOLEAN | | |
 
-**Derived allowance flags** — 26 columns, `has_<CODE>` BOOLEAN, one per `dim_allowance.allowance_code`, set from the *monthly* entitlement. `has_SEVERANCE` is therefore always false: SEVERANCE is `one_off` and is paid once, in the settlement month, as a `fact_payroll_allowance` row
+**Derived allowance flags** — 26 columns, `has_<CODE>` BOOLEAN, one per `dim_allowance.allowance_code`, set from the *monthly* entitlement in pass 1 and re-derived in pass 2 from what the employee is actually **paid** in their last working month, so that `allowance_ratio` — which B03 is detected on — describes the money rather than the entitlement. `has_SEVERANCE` is therefore always false: SEVERANCE is `one_off` and is paid once, in the settlement month, as a `fact_payroll_allowance` row
 (`has_HOUSING`, `has_REMOTE_SITE`, …). Plus `allowance_total_monthly` DECIMAL(12,2) and
 `allowance_ratio` DOUBLE (= `allowance_total_monthly / base_salary`, basis of **B03**).
 
@@ -365,10 +365,24 @@ that reads `labels_anomaly` scores 100% and is worthless.
 
 ### `labels_confounder`
 
-Same shape, `anomaly_code` replaced by `confounder_type`. Planted **legitimate** oddities — senior
-specialists paid above the band, mid-year jumps *with* proper assignment records, spousal shared
-IBANs. These must **not** be labelled anomalies and must **not** be scored CRITICAL. Measuring that
-is the false-positive half of the evaluation.
+**PK** (`employee_id`, `confounder_type`, `period_from`). The same shape as `labels_anomaly` with
+two substitutions: `anomaly_code` becomes `confounder_type`, and `family`/`injected_severity` become
+`confounds_code`, because a confounder is legitimate and so has no severity of its own.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `employee_id` | VARCHAR(10) | |
+| `confounder_type` | VARCHAR(32) | `legit_high_earner`, `legit_salary_jump`, `spousal_shared_iban`, `low_activity_role`, `legit_final_settlement`, `legit_rotation_stack`, `legit_retro_correction` |
+| `confounds_code` | VARCHAR(3) | The anomaly code whose **precision** this plant exists to measure. |
+| `period_from` / `period_to` | INT32 | The window the look-alike is visible in. |
+| `injection_params_json` | VARCHAR | Exact parameters used. |
+| `human_description` | VARCHAR | Plain English, for the eval report. |
+| `work_site_id` / `region_code` | | Denormalised, as in `labels_anomaly`. |
+| `expected_monthly_impact` | DECIMAL(12,2) | The SAR at stake, so a false positive can be costed. |
+
+Planted **legitimate** oddities — senior specialists near the top of the band, mid-year jumps *with*
+proper assignment records, spousal shared IBANs. These must **not** be labelled anomalies and must
+**not** be scored CRITICAL. Measuring that is the false-positive half of the evaluation.
 
 ---
 
@@ -391,8 +405,10 @@ gates read it; it is what makes a run reproducible.
 
 `generated_at` is the only wall-clock value anywhere in a run, and it is in the manifest rather than
 in the Parquet so that two runs with the same seed stay byte-identical. `reference_date` and `noise`
-record the two other arguments that change what was generated. `policy_digest` covers all six packs
-under `policy/`. Pass 1 writes `injection` with zeroes; pass 2 fills it in.
+record the two other arguments that change what was generated. `policy_digest` covers all seven packs
+under `policy/` (`injection.yaml` joined them in phase 2). Pass 1 writes `injection` with zeroes;
+pass 2 fills it in, and a `--no-inject` run leaves the zeroes, which the eval harness reads as "no
+ground truth in this lake". `by_code` counts **employees carrying that code**, not rows.
 
 `policy_digest` matters: if a policy file changed but the data did not regenerate, the detector is
 being evaluated against stale ground truth. The eval harness fails loudly on a digest mismatch.
@@ -410,5 +426,8 @@ being evaluated against stale ground truth. The eval harness fails loudly on a d
 - `manager_id` graph is acyclic; every `org_unit_id` chain terminates at a level-1 unit.
 - Every IBAN passes MOD-97; every `national_id`/`iqama_no` passes its check digit.
 - `gross` and `net` reconcile with their components to the stored cent.
-- **Zero policy violations** in the clean set: every paid allowance satisfies its
-  `policy/allowance_rules.yaml` eligibility clause. This is the phase-1 gate.
+- **Zero *unlabelled* policy violations**: every one of the 34 anomaly-code predicates, evaluated
+  over the lake, returns only rows that `labels_anomaly` or `labels_confounder` accounts for. Before
+  pass 2 the label tables are empty and this is the phase-1 gate in its original form — the clean
+  population contains no violation at all. After pass 2 it is the stronger statement: every
+  violation present is one the generator wrote down.

@@ -120,10 +120,19 @@ def test_rotation_only_where_the_site_supports_it(con):
 
 
 def test_allowance_load_stays_below_the_injection_range(con, policy):
-    """B03 injects a 0.70-0.90 ratio; the clean set has to sit under that."""
+    """B03 injects a load above the ceiling; everyone else sits under it.
+
+    Measured over the employees pass 2 did not touch: the point of the ceiling
+    is that a B03 finding cannot hide among ordinary loads, which only means
+    anything if the ordinary loads are genuinely below it.
+    """
     ceiling = float(policy.pack.allowance_load["clean_population_ratio_max"])
     worst, median = con.execute(
-        "SELECT max(allowance_ratio), median(allowance_ratio) FROM employee_master"
+        "SELECT max(allowance_ratio), median(allowance_ratio) FROM employee_master e "
+        "WHERE NOT EXISTS (SELECT 1 FROM labels_anomaly l "
+        "WHERE l.employee_id = e.employee_id) "
+        "AND NOT EXISTS (SELECT 1 FROM labels_confounder c "
+        "WHERE c.employee_id = e.employee_id)"
     ).fetchone()
     assert float(worst) <= ceiling + 1e-6
     assert 0.2 <= float(median) <= ceiling
@@ -153,9 +162,12 @@ def test_managers_change_over_a_career(con):
 
 
 def test_nobody_approves_their_own_assignment(con):
-    """Self-approval is C05; the approver is the manager at the time."""
+    """Self-approval is C05; everywhere else the approver is the manager."""
     assert con.execute(
-        "SELECT count(*) FROM fact_assignment_history WHERE approved_by = employee_id"
+        "SELECT count(*) FROM fact_assignment_history h "
+        "WHERE h.approved_by = h.employee_id AND NOT EXISTS ("
+        "SELECT 1 FROM labels_anomaly l WHERE l.employee_id = h.employee_id "
+        "AND l.anomaly_code = 'C05')"
     ).fetchone()[0] == 0
     assert con.execute(
         "SELECT count(DISTINCT approved_by) FROM fact_assignment_history"
@@ -169,4 +181,10 @@ def test_realism_noise_is_present_but_never_labelled(con, slice_lake):
     ).fetchone()[0]
     total = con.execute("SELECT count(*) FROM employee_master").fetchone()[0]
     assert 0 < flagged < total * 0.25, flagged
-    assert not (slice_lake.lake / "labels_anomaly").exists()
+    # The two vocabularies must not overlap: a casing quirk is a data-quality
+    # issue, and an anomaly code is a finding.
+    flags = {row[0] for row in con.execute(
+        "SELECT DISTINCT unnest(dq_flags) FROM employee_master").fetchall()}
+    codes = {row[0] for row in con.execute(
+        "SELECT DISTINCT anomaly_code FROM labels_anomaly").fetchall()}
+    assert flags and codes and not (flags & codes)

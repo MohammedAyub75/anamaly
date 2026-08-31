@@ -11,7 +11,14 @@ from __future__ import annotations
 import json
 
 import pytest
-from datagen.integrity import anomaly_predicates, connect, run, summarise
+from datagen.integrity import (
+    anomaly_predicates,
+    connect,
+    found_count,
+    run,
+    summarise,
+    unlabelled_count,
+)
 
 
 @pytest.fixture(scope="module")
@@ -42,15 +49,16 @@ def test_every_code_is_reported_separately(report):
 
 
 def test_a_planted_violation_is_detected(slice_lake, policy):
-    """Break A02 by hand and confirm the predicate stops returning zero.
+    """Break A02 by hand and confirm the predicate notices.
 
     Without this the suite could be passing because the queries are wrong
-    rather than because the data is clean.
+    rather than because the data is accounted for.
     """
     con = connect(slice_lake)
     try:
         _, sql = anomaly_predicates(slice_lake, policy)["A02"]
-        assert con.execute(sql).fetchone()[0] == 0
+        assert unlabelled_count(con, "A02", sql) == 0
+        assert found_count(con, sql) > 0, "A02 was injected, so it must be found"
         # Every site becomes tier 0, so the HARDSHIP rows already in the lake
         # are all violations of the same clause A02 polices.
         con.execute(
@@ -59,7 +67,7 @@ def test_a_planted_violation_is_detected(slice_lake, policy):
         )
         tampered = sql.replace("JOIN dim_site st", "JOIN site_zero st")
         assert tampered != sql
-        assert con.execute(tampered).fetchone()[0] > 0
+        assert unlabelled_count(con, "A02", tampered) > 0
     finally:
         con.close()
 
@@ -69,7 +77,8 @@ def test_manifest_declares_the_policy_digest(slice_lake, policy):
     assert manifest["policy_digest"] == policy.pack.digest
     assert manifest["seed"] == slice_lake.seed
     assert manifest["period_count"] == slice_lake.periods
-    assert manifest["injection"]["employees_with_anomaly"] == 0
+    assert manifest["injection"]["employees_with_anomaly"] > 0
+    assert len(manifest["injection"]["by_code"]) >= 30
 
 
 def test_summary_prints_counts_not_rows(slice_lake):

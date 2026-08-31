@@ -11,7 +11,7 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 |---|---|---|---|---|---|
 | 0 | Contract docs, CLAUDE.md, skills, repo scaffold, Compose skeleton, `policy/sites.yaml` (13 regions) | ✅ PASSED | `verify 0` — 24/24 checks | 2026-08-31 | `phase-00` |
 | 1 | `datagen` pass 1 — clean population at 10k, 7 dimensions + 6 facts, 0/34 policy violations | ✅ PASSED | `verify 1` — 54/54 checks | 2026-08-31 | `phase-01` |
-| 2 | Anomaly injection — 34 codes + `labels_anomaly` + confounders | ⬜ not started | `verify 2` | — | — |
+| 2 | `datagen` pass 2 — 34 anomaly codes injected + `labels_anomaly` + 7 confounder types | ✅ PASSED | `verify 2` — 44/44 checks, 34/34 codes at 100% agreement | 2026-08-31 | `phase-02` |
 | 3 | Feature build + Layer 1 rule engine + eval harness | ⬜ not started | `verify 3` | — | — |
 | 4 | Layer 2 peer stats + expected-salary model + SHAP | ⬜ not started | `verify 4` | — | — |
 | 5 | Layer 3 Isolation Forest + autoencoder + graph checks | ⬜ not started | `verify 5` | — | — |
@@ -27,12 +27,12 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 
 ## Next session
 
-Read `CLAUDE.md`, `docs/specs/datagen.md`, `docs/handoff/PHASE_01.md`. Implement phase 2 — anomaly
-injection: the 34 codes, `labels_anomaly`, and the seven confounder types in `labels_confounder`.
-First command:
+Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_02.md`. Implement phase 3 — the
+feature build, the layer-1 rule engine and the eval harness. First command:
 
 ```
-python tasks.py verify 1
+python tasks.py verify 2
 ```
 
-(confirms the clean population is still clean before breaking it on purpose).
+(confirms every code is injected and every violation in the lake is accounted for, before building
+something to find them).
