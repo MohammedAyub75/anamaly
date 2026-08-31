@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# policy/payroll.yaml — the money rules outside the allowance table
+#
+# GOSI rates, overtime limits, bonus policy and the end-of-service settlement
+# are policy, not generator trivia: the detector reads the same numbers back
+# (B05 needs the legal overtime maximum, C04 needs the settlement window) and a
+# customer will want to change them without a code change.
+#
+# All amounts are MONTHLY SAR. Contract: docs/DATA_DICTIONARY.md ->
+# fact_payroll_monthly; docs/ANOMALY_CATALOG.md -> B05, B06, C04, D02.
+# ---------------------------------------------------------------------------
+version: 1
+currency: SAR
+
+# GOSI contribution rates by insurance class. `contributory_ceiling` is the
+# monthly wage above which contributions stop accruing.
+gosi:
+  contributory_ceiling: 45000
+  # Contributions are levied on base pay plus the housing allowance, which is
+  # how the Saudi scheme defines the contributory wage.
+  contributory_components: [base_pay, HOUSING]
+  classes:
+    saudi_full:    {employee_pct: 9.75, employer_pct: 11.75}
+    gcc_bilateral: {employee_pct: 9.00, employer_pct: 9.00}
+    expat_hazards: {employee_pct: 0.00, employer_pct: 2.00}
+
+overtime:
+  multiplier: 1.5
+  standard_monthly_hours: 208        # divisor for the hourly rate
+  legal_monthly_max_hours: 60        # above this -> B05
+  # Only these work patterns draw overtime at all; office staff do not.
+  eligible_work_patterns: [shift, rotation_28_28, rotation_14_14, regular]
+  clean_population_max_hours: 52     # pass 1 stays clear of the legal maximum
+
+bonus:
+  # One annual payment, landing in this calendar month.
+  payment_month: 3
+  # Share of base pay by performance rating. Monotone on purpose: a top-decile
+  # bonus on a rating of 1-2 is exactly what B06 detects.
+  pct_of_base_by_rating: {1: 0.0, 2: 0.15, 3: 0.60, 4: 1.20, 5: 2.00}
+
+retro_adjustment:
+  # A retro correction is normal; a stream of them is D02.
+  employee_share: 0.15               # employees carrying at least one
+  max_per_employee_clean: 2          # pass 1 never reaches the D02 threshold of 3
+  pct_of_base_range: [-0.06, 0.09]
+
+loan:
+  employee_share: 0.15
+  pct_of_base_range: [0.05, 0.12]
+
+absence:
+  # An unauthorised absence day costs one day of base pay.
+  deduction_basis: daily_base
+
+separation:
+  # A terminated employee is paid to the end of their termination month and
+  # receives exactly one SEVERANCE settlement in the month after. Anything
+  # beyond that window is C04.
+  settlement_months: 1
+  min_service_years: 2

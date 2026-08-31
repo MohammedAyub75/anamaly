@@ -46,6 +46,7 @@ Also reachable as `python tasks.py datagen --scale 10k --seed 42`, which is the 
 | `--periods` | `24` | Months of history |
 | `--reference-date` | `2026-08-31` | "Today" for the run. Never `datetime.now()` — that would break determinism. |
 | `--no-noise` | off | Skip realism noise. Debugging only; never used for a gate run. |
+| `--employees` | tier default | Generate a smaller slice than the tier. Used by the determinism check and the test suite; not part of the documented workflow. |
 
 Exit non-zero on any integrity failure. `summary` must print a compact table, never row data.
 
@@ -59,11 +60,21 @@ streams = {name: np.random.default_rng(s)
            for name, s in zip(TABLE_NAMES, root.spawn(len(TABLE_NAMES)))}
 ```
 
-- **One independent stream per table**, spawned from a single root `SeedSequence`. Generating
-  `dim_job` must not shift the numbers `employee_master` draws — otherwise adding a column anywhere
-  silently changes the whole dataset.
-- Within a table, chunk `k` draws from `streams[table].spawn(k)`, so **chunk size does not affect
-  output**. A 10k run and a 1m run must produce identical rows for the first 10k employees.
+- **One independent stream per table**, spawned from a single root `SeedSequence` keyed by the
+  table's position in `datagen.config.TABLE_NAMES`. Generating `dim_job` must not shift the numbers
+  `employee_master` draws — otherwise adding a column anywhere silently changes the whole dataset.
+- **Within a table, one child stream per field per chunk**, derived by a stable hash of the field
+  name (`blake2b`, not `hash()`, which is salted per process) rather than by draw order. Adding a
+  column therefore moves no other column's numbers either.
+- **Chunk size is a constant** (`CHUNK_ROWS = 100_000`), not a tier property, so row *N* falls in the
+  same chunk at the same offset at every scale and every field draw for that row is identical
+  between a 10k run and a 1m run.
+- Draws are **prefix-stable**: the first *n* values of an *m*-row draw equal the first *n* of an
+  *n*-row draw, which is why categorical sampling goes through one uniform per row plus
+  `searchsorted` rather than `Generator.choice`. Fields that are genuinely a function of the whole
+  population — `manager_id`, `spouse_employee_id`, `dim_org_unit.head_employee_id` — legitimately
+  differ between population sizes, because "the lowest-graded manager at least two grades up" is not
+  a per-row property.
 - No `random`, no unseeded `numpy.random.*`, no `datetime.now()`, no `uuid4()`, no dict/set
   iteration order dependence, no unstable sort. Sort keys must be total.
 - Faker (if used) gets its own seeded instance per stream. Do not use a module-level Faker.
@@ -84,14 +95,21 @@ with a different seed.
 ## Module layout
 
 ```
+policycore/          # shared with the phase-3 rule engine — see below
+  clauses.py         # the eligibility clause grammar, parsed once
+  packs.py           # loads + validates policy/*.yaml, resolves class_defaults, digests
+  entitlement.py     # THE shared entitlement resolver
+
 services/datagen/
   pyproject.toml
   datagen/
     __init__.py
-    __main__.py        # CLI (argparse), wires everything
+    __main__.py        # CLI (argparse) only
+    pipeline.py        # generation order and the chunk loop
     config.py          # scale tiers, paths, ScaleConfig dataclass
     rng.py             # SeedSequence stream management — the determinism contract
-    policy.py          # loads + validates policy/*.yaml, resolves class_defaults
+    policy.py          # datagen's view of a loaded pack: sampling weights, lookup tables
+    schemas.py         # docs/DATA_DICTIONARY.md as Arrow schemas; the writer casts to these
     writer.py          # chunked Parquet writer, row-group control, manifest accumulation
     dimensions/
       site.py org_unit.py job.py grade.py allowance.py region.py calendar.py
@@ -102,7 +120,7 @@ services/datagen/
       attendance.py    # fact_attendance_monthly
       banking.py       # fact_bank_account
       activity.py      # fact_system_activity_monthly
-    entitlement.py     # evaluates policy/allowance_rules.yaml eligibility — THE shared core
+    entitlement.py     # datagen's adapter over policycore: feature rows, memoisation, repair
     noise.py           # realism noise (missingness, casing, typos, late postings)
     names.py           # bilingual Saudi/Arab/expat name pools
     identifiers.py     # national_id, iqama, IBAN (MOD-97), badge — all check-digit valid
@@ -111,15 +129,22 @@ services/datagen/
   tests/
 ```
 
-### `entitlement.py` is the most important module
+### `policycore` is the most important module
 
 It evaluates the eligibility clauses in `policy/allowance_rules.yaml` against a denormalised
 employee row and returns the set of allowances that employee is entitled to, with amounts.
 
 Pass 1 pays **exactly** this set. Phase 3's rule engine will evaluate the same clauses to detect
-violations. Two implementations of the same policy is how injector/detector drift starts — so this
-module must be written to be reusable by the detector, or the clause evaluation must be a shared
-library from the start. Prefer the latter.
+violations. Two implementations of the same policy is how injector/detector drift starts, so the
+clause evaluation is a **shared library at the repo root** rather than a datagen module:
+`policycore.clauses` parses the grammar, `policycore.packs` resolves the packs, and
+`policycore.entitlement.resolve()` is the one answer to "what is this person entitled to".
+`services/datagen/datagen/entitlement.py` is the datagen-side adapter — it builds the feature row,
+memoises the resolver across the 24 periods, and owns the allowance-load repair described below.
+
+`one_off` allowances are excluded from the monthly resolution. SEVERANCE is the only one: its clause
+(`status == 'terminated'`) stays true for every month after somebody leaves, so paying it monthly
+would look exactly like C04. Payroll asks for it explicitly, once, in the settlement month.
 
 Amount resolution by `amount_basis`:
 
@@ -153,8 +178,9 @@ facts. Later steps read earlier output from Parquet rather than holding it in me
 8. `fact_assignment_history` — built from each employee's synthesised career, ending in their
    current state. Contiguous, non-overlapping intervals starting at `hire_date`.
 9. `fact_bank_account` — IBAN history; most employees have one row, some have a change.
-10. `fact_payroll_monthly` + `fact_payroll_allowance` — per period, chunked.
-11. `fact_attendance_monthly` — per period, consistent with work pattern and the calendar.
+10. `fact_attendance_monthly` — per period, consistent with work pattern and the calendar.
+11. `fact_payroll_monthly` + `fact_payroll_allowance` — per period, chunked. Attendance is built
+    first because payroll deducts the unauthorised absence and pays the overtime recorded there.
 12. `fact_system_activity_monthly` — per period, correlated with attendance.
 13. `manifest.json`, then `integrity.py` runs.
 
@@ -180,6 +206,18 @@ separable and the evaluation meaningless.
 - **Housing / transport**: correlate with site attributes. A drilling-camp worker is usually
   `company_camp_bachelor`, an HQ worker usually `allowance` or `own`. This correlation is what makes
   A05 and A06 non-trivial — the violation must be rare *and* plausible.
+- **Allowance load** must stay under `allowance_load.clean_population_ratio_max`, below the range
+  B03 injects into and below the `legit_rotation_stack` confounder. The flat site allowances at a
+  tier-3 posting are large against a junior salary, so the generator applies an ordered **repair
+  ladder** — company housing instead of a housing allowance, family not resident, own transport, a
+  post that is not safety-critical, then a higher position inside the employee's own salary band.
+  Every rung changes *who the employee is*; none of them withholds an entitlement, because
+  withholding would put a policy breach in the clean set pointing the other way. The repair is
+  driven by the **worst period of the career**, not by the current month, and every interval is then
+  fitted inside its own grade band.
+- **`months_since_site_change`** counts from the last *transfer that moved the employee's site*, and
+  is a large sentinel (999) when they have never been moved. Being hired is not a relocation:
+  reading it as one would pay RELOCATION — 3,500 SAR flat — to every new joiner.
 - **Work pattern**: rotation only where `site.rotation_supported`; shift mostly at plants and
   refineries; `remote`/`hybrid` mostly at offices.
 - **`status`**: ~93% active, ~5% terminated during the window, ~1% on leave, ~1% suspended.
@@ -224,6 +262,18 @@ quality issues, **not anomalies**, and must never appear in `labels_anomaly`.
 | Transliteration variant | 1.5% | e.g. Mohammed / Muhammad / Mohamed |
 | Date typo | 0.3% | Transposed digits in non-key dates only |
 | Late payroll posting | 1% | Row lands in the following period's `payroll_run_id` |
+
+## Policy packs this service reads
+
+`sites.yaml`, `grade_bands.yaml`, `allowance_rules.yaml` and `fusion.yaml` come from phase 0. Two
+more are owned by this service and carry what would otherwise be literals in Python:
+
+| Pack | Holds |
+|---|---|
+| `policy/payroll.yaml` | GOSI rates and the contributory ceiling, the overtime multiplier and legal monthly maximum, the bonus month and its rate-by-rating table, retro and loan rates, the end-of-service settlement window |
+| `policy/population.yaml` | The distribution parameters: nationality mix by site class, grade floors at hard sites, the tenure curve, status mix, work-pattern/housing/transport correlations, job family by site class, career spacings, attendance and activity rates, and the realism-noise rates |
+
+All six are SHA-256 digested into `manifest.json`.
 
 ## `manifest.json`
 

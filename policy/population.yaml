@@ -1,0 +1,211 @@
+# ---------------------------------------------------------------------------
+# policy/population.yaml — the shape of the synthetic workforce
+#
+# A uniform population makes every anomaly trivially separable and the whole
+# evaluation meaningless (docs/specs/datagen.md). These are the distribution
+# parameters that make the clean population skewed the way a real Saudi energy
+# workforce is: Saudization mix by site class, a top-tapering grade pyramid, a
+# right-skewed tenure curve, and housing/transport that correlate with the site.
+#
+# Read only by services/datagen. Held here rather than in Python because
+# CLAUDE.md says thresholds are config, and because phase 7 will retune them
+# for the 1m tier without touching code.
+# ---------------------------------------------------------------------------
+version: 1
+
+scales:
+  10k:  {employees: 10000,   org_units: 1280,  chunk_rows: 100000}
+  100k: {employees: 100000,  org_units: 4232,  chunk_rows: 100000}
+  1m:   {employees: 1000000, org_units: 12040, chunk_rows: 100000}
+
+# Level-1 business lines. Everything below is generated beneath these.
+business_lines:
+  - Upstream Operations
+  - Downstream Manufacturing
+  - Gas Operations
+  - Engineering and Project Management
+  - Technical Services
+  - Corporate Affairs
+  - Finance and Commercial
+  - Human Resources and Support
+
+# Branching factor per level, per scale tier. Level 1 is len(business_lines).
+org_branching:
+  10k:  [3, 4, 4, 2]
+  100k: [4, 4, 5, 4]
+  1m:   [4, 5, 10, 6]
+
+nationality:
+  # Base mix, overridden per site class. 62% saudi / 5% gcc / 33% expat overall.
+  default: {saudi: 0.62, gcc: 0.05, expat: 0.33}
+  by_site_class:
+    hq:            {saudi: 0.78, gcc: 0.04, expat: 0.18}
+    office:        {saudi: 0.76, gcc: 0.04, expat: 0.20}
+    medical:       {saudi: 0.55, gcc: 0.05, expat: 0.40}
+    training:      {saudi: 0.74, gcc: 0.04, expat: 0.22}
+    refinery:      {saudi: 0.62, gcc: 0.05, expat: 0.33}
+    plant:         {saudi: 0.60, gcc: 0.05, expat: 0.35}
+    terminal:      {saudi: 0.61, gcc: 0.05, expat: 0.34}
+    depot:         {saudi: 0.64, gcc: 0.05, expat: 0.31}
+    drilling_camp: {saudi: 0.38, gcc: 0.05, expat: 0.57}
+    offshore:      {saudi: 0.42, gcc: 0.05, expat: 0.53}
+    pump_station:  {saudi: 0.48, gcc: 0.05, expat: 0.47}
+  # ISO 3166-1 alpha-3 pools, sampled with these weights.
+  countries:
+    saudi: {SAU: 1.0}
+    gcc:   {ARE: 0.24, KWT: 0.20, BHR: 0.24, QAT: 0.16, OMN: 0.16}
+    expat: {IND: 0.29, PAK: 0.18, EGY: 0.14, PHL: 0.12, BGD: 0.09,
+            SDN: 0.06, LBN: 0.04, JOR: 0.04, GBR: 0.02, USA: 0.02}
+
+grade:
+  # Remote and offshore operations are staffed by specialists, so the pyramid
+  # is shifted up at the harder sites. Without this the big fixed site
+  # allowances would dwarf a junior salary and every clean offshore worker
+  # would breach the allowance-load ceiling.
+  hardship_min_grade: {0: 1, 1: 2, 2: 6, 3: 7}
+  site_class_min_grade: {offshore: 8, drilling_camp: 6, pump_station: 6}
+
+tenure:
+  # Right-skewed: mode around 6-9 years, long tail to 35.
+  gamma_shape: 2.35
+  gamma_scale: 3.6
+  max_years: 35
+  # Grade correlates with service; this is the minimum service a grade implies.
+  min_years_per_grade_step: 0.85
+
+status:
+  active: 0.93
+  terminated: 0.05
+  on_leave: 0.01
+  suspended: 0.01
+  termination_reason: {resignation: 0.46, end_of_contract: 0.30,
+                       retirement: 0.16, dismissal: 0.08}
+
+employment_type: {direct: 0.86, contractor: 0.08, secondee: 0.03, trainee: 0.03}
+contract_type:   {permanent: 0.78, fixed_term: 0.18, temporary: 0.04}
+source_system:   {sap_hr: 0.74, legacy_hr: 0.19, manual: 0.07}
+payment_method:  {bank_transfer: 0.985, cheque: 0.010, cash: 0.005}
+
+marital:
+  # by service-year band; married share rises with age and tenure.
+  married_share_by_service: {0: 0.34, 5: 0.62, 10: 0.78, 20: 0.86}
+  divorced_share: 0.04
+  widowed_share: 0.01
+  max_dependents: 8
+  # Low-grade expats overwhelmingly leave their family at home; this is the
+  # correlation that keeps SCHOOL_ASSIST realistic (and A04 non-trivial).
+  in_kingdom_share: {saudi: 0.97, gcc: 0.80, expat_low_grade: 0.10, expat_high_grade: 0.72}
+  expat_high_grade_from: 9
+  spouse_internal_share: 0.03
+
+work_pattern:
+  # Rotation only where the site supports it; shift mostly at process sites.
+  by_site_class:
+    hq:            {regular: 0.70, hybrid: 0.20, remote: 0.10}
+    office:        {regular: 0.66, hybrid: 0.24, remote: 0.10}
+    medical:       {regular: 0.55, shift: 0.45}
+    training:      {regular: 0.88, hybrid: 0.12}
+    refinery:      {regular: 0.42, shift: 0.58}
+    plant:         {regular: 0.44, shift: 0.56}
+    terminal:      {regular: 0.50, shift: 0.50}
+    depot:         {regular: 0.72, shift: 0.28}
+    drilling_camp: {rotation_28_28: 0.62, rotation_14_14: 0.24, regular: 0.14}
+    offshore:      {rotation_28_28: 0.70, rotation_14_14: 0.20, regular: 0.10}
+    pump_station:  {rotation_14_14: 0.46, rotation_28_28: 0.20, shift: 0.20, regular: 0.14}
+
+housing:
+  # `allowance` means the employee houses themselves and is paid for it; the
+  # company_ values mean they are already housed, which is what makes A05 a
+  # real finding rather than a formality.
+  camp_bachelor_share: 0.82        # where camp_available and no family housing
+  family_housing_share: 0.34       # where family_housing_available
+  allowance_share_office: 0.38
+
+transport:
+  company_bus_share_by_site_class: {
+    hq: 0.30, office: 0.22, medical: 0.24, training: 0.26, refinery: 0.62,
+    plant: 0.64, terminal: 0.58, depot: 0.48, drilling_camp: 0.86,
+    offshore: 0.90, pump_station: 0.80 }
+  allowance_share_remainder: 0.45
+
+# Which job families staff which kind of site. A drilling camp is not run by
+# the finance department, and without this correlation `job_family` would be
+# noise rather than the peer-cohort key layer 2 relies on.
+job_family_by_site_class:
+  hq:            {Finance: 0.20, HR: 0.16, IT: 0.16, Procurement: 0.14, HSE: 0.10, Security: 0.08, Reservoir: 0.08, Maintenance: 0.04, Medical: 0.02, Process Ops: 0.02}
+  office:        {Finance: 0.20, HR: 0.16, Procurement: 0.16, IT: 0.14, Reservoir: 0.12, HSE: 0.08, Security: 0.06, Maintenance: 0.05, Drilling: 0.03}
+  medical:       {Medical: 0.72, HSE: 0.10, HR: 0.06, Security: 0.06, IT: 0.06}
+  training:      {HR: 0.34, HSE: 0.24, Process Ops: 0.14, Maintenance: 0.12, IT: 0.08, Security: 0.08}
+  refinery:      {Process Ops: 0.40, Maintenance: 0.30, HSE: 0.12, Security: 0.06, IT: 0.04, Procurement: 0.04, Medical: 0.02, Finance: 0.02}
+  plant:         {Process Ops: 0.40, Maintenance: 0.29, HSE: 0.12, Security: 0.06, IT: 0.04, Procurement: 0.04, Medical: 0.03, Reservoir: 0.02}
+  terminal:      {Process Ops: 0.34, Maintenance: 0.26, Procurement: 0.14, HSE: 0.12, Security: 0.10, IT: 0.04}
+  depot:         {Procurement: 0.42, Maintenance: 0.22, Security: 0.14, HSE: 0.12, Process Ops: 0.10}
+  drilling_camp: {Drilling: 0.48, Maintenance: 0.20, HSE: 0.12, Process Ops: 0.08, Medical: 0.06, Security: 0.06}
+  offshore:      {Drilling: 0.34, Process Ops: 0.24, Maintenance: 0.22, HSE: 0.10, Medical: 0.06, Security: 0.04}
+  pump_station:  {Process Ops: 0.40, Maintenance: 0.34, HSE: 0.12, Security: 0.14}
+
+# Share of employees who are female, by site class. The Saudi energy sector is
+# male-dominated in the field and far less so in corporate functions.
+female_share_by_site_class: {
+  hq: 0.30, office: 0.28, medical: 0.46, training: 0.26, refinery: 0.08,
+  plant: 0.08, terminal: 0.07, depot: 0.07, drilling_camp: 0.02,
+  offshore: 0.02, pump_station: 0.03 }
+
+# The org level an employee sits at, by grade. Sections hold the workforce;
+# department, division and business-line units hold the people who manage them,
+# which is what gives every employee a manager at least two grades above.
+org_level_by_grade: {12: 5, 15: 4, 17: 3, 19: 2, 20: 1}
+
+education:
+  # Conditional on grade band; every employee still clears their job's minimum.
+  by_grade_band:
+    1-4:   {secondary: 0.46, diploma: 0.40, bachelor: 0.14}
+    5-8:   {secondary: 0.14, diploma: 0.38, bachelor: 0.44, master: 0.04}
+    9-13:  {diploma: 0.14, bachelor: 0.64, master: 0.20, doctorate: 0.02}
+    14-17: {bachelor: 0.52, master: 0.42, doctorate: 0.06}
+    18-20: {bachelor: 0.34, master: 0.52, doctorate: 0.14}
+  languages_multi_share: 0.26
+  training_hours_max: 400
+
+career:
+  promotion_min_months_in_grade: 18
+  increment_min_months: 13          # >12 keeps B07's rolling window clean
+  promotion_annual_hazard: 0.11
+  transfer_annual_hazard: 0.08
+  # A transfer only moves an employee's site from grade 14 up. Relocation
+  # support is 3,500 SAR/month: on a junior salary that single allowance would
+  # dominate the pay packet and trip the allowance-load ceiling.
+  site_change_min_grade: 14
+  acting_role_share: 0.025
+  acting_max_months_clean: 11       # policy maximum is 12 -> A12 stays unbroken
+
+attendance:
+  annual_leave_days_per_year: 30
+  sick_share: 0.20
+  absence_rate: 0.035               # share of employee-periods with any absence
+  max_absence_days: 4
+  long_leave_min_days: 15           # a month with this much leave draws no overtime
+
+activity:
+  # Proxy signals that make a ghost employee visible. Floors keep every clean
+  # employee well clear of the C03 "activity_score approximately zero" predicate.
+  min_activity_score: 0.08
+  badge_swipes_per_worked_day: {regular: 2.0, shift: 2.0, hybrid: 1.1,
+                                remote: 0.15, rotation_28_28: 2.0, rotation_14_14: 2.0}
+  emails_per_worked_day: {1: 1.5, 9: 6.0, 14: 12.0}
+  erp_logins_per_worked_day: 1.4
+  vpn_sessions_per_worked_day: {regular: 0.2, shift: 0.1, hybrid: 0.9,
+                                remote: 1.6, rotation_28_28: 0.3, rotation_14_14: 0.3}
+
+banking:
+  iban_change_share: 0.08
+  bank_codes: [RJHI, NCBK, RIBL, SABB, ALBI, BSFR, ARNB, INMA, ALJZ, SIBC]
+
+noise:
+  # Data-quality issues, never anomalies. Recorded in employee_master.dq_flags.
+  missing_optional_rate: 0.02
+  missing_optional_rate_manual: 0.05
+  name_casing_rate: 0.03
+  transliteration_rate: 0.015
+  date_typo_rate: 0.003
+  late_posting_rate: 0.01

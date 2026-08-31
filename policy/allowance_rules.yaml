@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# policy/allowance_rules.yaml — the 25 allowance codes and their eligibility
+# policy/allowance_rules.yaml — the 26 allowance codes and their eligibility
 #
 # This file is the single definition of who may legitimately receive what. It
 # is read three times over:
@@ -363,3 +363,13 @@ mutual_exclusions:
 allowance_load:
   expected_ratio_max: 0.55
   hard_ceiling_ratio: 0.95
+  # datagen pass 1 keeps every clean employee at or below this ratio, leaving
+  # headroom under the hard ceiling that the phase-1 gate asserts. It is not
+  # lower because an offshore rotation worker legitimately stacks six
+  # site-driven allowances: the catalogue's own legit_rotation_stack confounder
+  # sits at ~0.60, and B03 is detected as a robust z WITHIN a cohort that
+  # includes site_class, not against a global threshold. The generator reaches
+  # this by adjusting the POPULATION (housing type, dependents resident in
+  # kingdom, transport mode, whether the post is safety-critical, position
+  # within the salary band), never by withholding an earned entitlement.
+  clean_population_ratio_max: 0.88

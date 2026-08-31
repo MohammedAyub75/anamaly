@@ -50,9 +50,11 @@ Source: `policy/sites.yaml` → `sites`, with booleans resolved from `class_defa
 | `rotation_supported` | BOOLEAN | | Basis of **A10**. |
 | `headcount_weight` | DOUBLE | > 0 | Relative staffing weight; deliberately Eastern-Province-heavy. |
 
-### `dim_org_unit` — ~12,000 rows
+### `dim_org_unit` — ~12,000 rows at 1m scale
 
 Five levels: Business Line → Admin Area → Division → Department → Section.
+
+The count scales with the tier (~1,280 at 10k, ~4,200 at 100k, ~12,000 at 1m): there must never be more units than there are people to fill them. Employees hang off the level their grade implies — sections hold the workforce, departments and above hold the people who manage them — which is what gives every employee a manager at least two grades higher.
 
 | Column | Type | Domain | Meaning |
 |---|---|---|---|
@@ -213,7 +215,7 @@ Materialised from `policy/allowance_rules.yaml`.
 | `transport_mode` | ENUM | `company_bus`, `allowance`, `own` | Basis of **A06**. |
 | `company_bus_route_id` | VARCHAR(8) | non-null iff `company_bus` | Evidence field for **A06**. |
 | `remote_work_approved_flag` | BOOLEAN | | |
-| `months_since_site_change` | INT16 | | Suppresses posting-lag false positives. |
+| `months_since_site_change` | INT16 | 999 = never moved | Months since the last transfer that changed the employee's site. Being hired is not a site change. Gates RELOCATION and suppresses posting-lag false positives. |
 
 **Compensation**
 
@@ -238,7 +240,7 @@ Materialised from `policy/allowance_rules.yaml`.
 | `payment_method` | ENUM | `bank_transfer`, `cash`, `cheque` | Non-transfer at scale is itself suspicious. |
 | `payroll_hold_flag` | BOOLEAN | | |
 
-**Derived allowance flags** — 26 columns, `has_<CODE>` BOOLEAN, one per `dim_allowance.allowance_code`
+**Derived allowance flags** — 26 columns, `has_<CODE>` BOOLEAN, one per `dim_allowance.allowance_code`, set from the *monthly* entitlement. `has_SEVERANCE` is therefore always false: SEVERANCE is `one_off` and is paid once, in the settlement month, as a `fact_payroll_allowance` row
 (`has_HOUSING`, `has_REMOTE_SITE`, …). Plus `allowance_total_monthly` DECIMAL(12,2) and
 `allowance_ratio` DOUBLE (= `allowance_total_monthly / base_salary`, basis of **B03**).
 
@@ -378,6 +380,7 @@ gates read it; it is what makes a run reproducible.
 ```json
 { "generator_version": "1.0.0", "seed": 42, "scale": "10k",
   "employee_count": 10000, "period_from": 202409, "period_to": 202608, "period_count": 24,
+  "reference_date": "2026-08-31", "noise": true,
   "generated_at": "2026-08-31T09:14:22Z",
   "row_counts": { "employee_master": 10000, "fact_payroll_monthly": 240000, "...": 0 },
   "injection": { "target_anomaly_rate": 0.025, "employees_with_anomaly": 250,
@@ -385,6 +388,11 @@ gates read it; it is what makes a run reproducible.
                  "confounders": { "legit_high_earner": 40 } },
   "policy_digest": { "sites.yaml": "sha256:…", "allowance_rules.yaml": "sha256:…" } }
 ```
+
+`generated_at` is the only wall-clock value anywhere in a run, and it is in the manifest rather than
+in the Parquet so that two runs with the same seed stay byte-identical. `reference_date` and `noise`
+record the two other arguments that change what was generated. `policy_digest` covers all six packs
+under `policy/`. Pass 1 writes `injection` with zeroes; pass 2 fills it in.
 
 `policy_digest` matters: if a policy file changed but the data did not regenerate, the detector is
 being evaluated against stale ground truth. The eval harness fails loudly on a digest mismatch.

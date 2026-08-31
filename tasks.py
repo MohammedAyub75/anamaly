@@ -33,6 +33,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+# The generator lives in services/datagen and the shared policy core at the
+# repo root; both are importable from here without an install step, which is
+# what lets `python tasks.py` work on a fresh clone.
+SERVICE_PATHS = [ROOT, ROOT / "services" / "datagen"]
+
+
+def _add_service_paths() -> None:
+    for path in SERVICE_PATHS:
+        entry = str(path)
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+
 # --------------------------------------------------------------------------
 # Gate reporting
 # --------------------------------------------------------------------------
@@ -144,7 +156,7 @@ def _load_yaml(path: Path):
 
 def _git(*args: str) -> tuple[int, str]:
     proc = subprocess.run(
-        ["git", *args], cwd=ROOT, capture_output=True, text=True
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
@@ -415,6 +427,36 @@ PHASE_TITLES = {
 }
 
 
+def verify_1() -> int:
+    """Phase-1 gate: the clean population, checked against the contract docs.
+
+    Generates the 10k lake if it is missing, then runs the integrity suite --
+    schema, row counts, referential integrity, domain validity, arithmetic and
+    all 34 anomaly-code predicates, each reported separately so a leak is
+    visible by code rather than as a total.
+    """
+    _add_service_paths()
+    from datagen.config import ScaleConfig
+    from datagen.integrity import run
+    from datagen.policy import DatagenPolicy
+
+    policy = DatagenPolicy.load(ROOT / "policy")
+    cfg = ScaleConfig.build("10k", 42, policy.population, out=ROOT / "data" / "raw")
+
+    if not cfg.manifest_path.exists():
+        from datagen.pipeline import generate
+
+        print(f"generating {cfg.scale} dataset (seed {cfg.seed}) ...")
+        result = generate(cfg, policy)
+        print(f"generated in {result.seconds:.1f}s")
+
+    report = run(cfg, policy)
+    gate = Gate(1, PHASE_TITLES[1])
+    for check in report.checks:
+        gate.check(check.name, check.ok, check.detail)
+    return gate.report()
+
+
 def verify_pending(phase: int) -> int:
     title = PHASE_TITLES.get(phase, "unknown phase")
     print(f"\nPhase {phase} gate — {title}")
@@ -427,6 +469,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     phase = args.phase
     if phase == 0:
         return verify_0()
+    if phase == 1:
+        return verify_1()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)
@@ -447,6 +491,20 @@ def _not_yet(verb: str, phase: int) -> int:
     return 2
 
 
+def cmd_datagen(args: argparse.Namespace) -> int:
+    """Thin wrapper over `python -m datagen`, which is the real CLI."""
+    _add_service_paths()
+    from datagen.__main__ import main as datagen_main
+
+    argv = [args.command, "--scale", args.scale, "--out", args.out]
+    if args.command == "generate":
+        argv += ["--seed", str(args.seed), "--periods", str(args.periods),
+                 "--reference-date", args.reference_date]
+        if args.no_noise:
+            argv.append("--no-noise")
+    return datagen_main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python tasks.py",
@@ -461,7 +519,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("datagen", help="generate the synthetic dataset (phase 1)")
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
     p.add_argument("--seed", type=int, default=42)
-    p.set_defaults(func=lambda a: _not_yet("datagen", 1))
+    p.add_argument("--out", default="data/raw")
+    p.add_argument("--periods", type=int, default=24)
+    p.add_argument("--reference-date", default="2026-08-31")
+    p.add_argument("--no-noise", action="store_true")
+    p.add_argument("--command", default="generate",
+                   choices=["generate", "validate", "summary"])
+    p.set_defaults(func=cmd_datagen)
 
     p = sub.add_parser("detect", help="run a detection batch (phase 3)")
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
