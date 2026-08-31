@@ -1,0 +1,365 @@
+# ---------------------------------------------------------------------------
+# policy/allowance_rules.yaml — the 25 allowance codes and their eligibility
+#
+# This file is the single definition of who may legitimately receive what. It
+# is read three times over:
+#   1. datagen pass 1 uses it to pay ONLY entitled allowances, which is what
+#      makes the clean population genuinely clean (phase-1 gate: 0 violations).
+#   2. datagen pass 2 breaks specific clauses on purpose to inject family-A
+#      anomalies, recording which clause was broken in labels_anomaly.
+#   3. The layer-1 rule engine reads the same clauses back to detect them.
+#
+# One definition, three consumers — so an entitlement can never mean one thing
+# to the generator and another to the detector.
+#
+# amount_basis
+#   fixed        flat monthly SAR
+#   pct_of_base  percentage of the employee's base salary
+#   grade_table  looked up per grade
+#   site_table   looked up per site hardship_tier
+#
+# eligibility conditions are written as field predicates over the denormalised
+# feature row (employee joined to dim_site). `all` = every condition must hold.
+#
+# Contract: docs/DATA_DICTIONARY.md -> dim_allowance, docs/ANOMALY_CATALOG.md
+# ---------------------------------------------------------------------------
+version: 1
+currency: SAR
+pay_period: monthly
+
+allowances:
+
+  HOUSING:
+    name_en: Housing Allowance
+    name_ar: "بدل السكن"
+    amount_basis: pct_of_base
+    rate_pct: 25.0
+    eligibility:
+      all:
+        - housing_type == 'allowance'          # paid only when NOT company-housed
+    violation_codes: [A05, A07]
+    regulatory_reference: "HR-COMP-002 Housing Policy s.3"
+
+  TRANSPORT:
+    name_en: Transport Allowance
+    name_ar: "بدل النقل"
+    amount_basis: pct_of_base
+    rate_pct: 10.0
+    cap: 1500
+    eligibility:
+      all:
+        - transport_mode == 'allowance'        # not on a company bus route
+    violation_codes: [A06, A07]
+    regulatory_reference: "HR-COMP-004 Transport Policy s.2"
+
+  REMOTE_SITE:
+    name_en: Remote Site Allowance
+    name_ar: "بدل الموقع النائي"
+    amount_basis: site_table
+    site_table: {tier_0: 0, tier_1: 0, tier_2: 2400, tier_3: 3200}
+    eligibility:
+      all:
+        - site.remote_allowance_eligible == true
+        - site.site_class not in ['hq', 'office', 'medical', 'training']
+    violation_codes: [A01, A07]
+    regulatory_reference: "HR-COMP-011 Remote Assignment s.1"
+    # A01 is the flagship case: this allowance paid to someone posted at
+    # Dhahran HQ. Every field in the predicate is a citable evidence field.
+
+  HARDSHIP:
+    name_en: Hardship Allowance
+    name_ar: "بدل المشقة"
+    amount_basis: site_table
+    site_table: {tier_0: 0, tier_1: 800, tier_2: 1900, tier_3: 3000}
+    eligibility:
+      all:
+        - site.hardship_tier >= 1
+    violation_codes: [A02, A07]
+    regulatory_reference: "HR-COMP-012 Hardship Classification s.4"
+
+  OFFSHORE:
+    name_en: Offshore Allowance
+    name_ar: "بدل العمل البحري"
+    amount_basis: fixed
+    amount: 4200
+    eligibility:
+      all:
+        - site.offshore_eligible == true
+        - site.site_class == 'offshore'
+    violation_codes: [A03]
+    regulatory_reference: "HR-COMP-013 Offshore Operations s.2"
+
+  ROTATION:
+    name_en: Rotation Allowance
+    name_ar: "بدل التناوب"
+    amount_basis: fixed
+    amount: 1800
+    eligibility:
+      all:
+        - site.rotation_supported == true
+        - work_pattern in ['rotation_28_28', 'rotation_14_14']
+    violation_codes: [A10]
+    regulatory_reference: "HR-OPS-021 Rotational Assignment s.3"
+
+  SCHOOL_ASSIST:
+    name_en: School Assistance
+    name_ar: "مساعدة التعليم"
+    amount_basis: fixed
+    amount: 2500
+    per_dependent: true
+    max_dependents: 3
+    eligibility:
+      all:
+        - dependents_count > 0
+        - dependents_in_kingdom > 0
+        - marital_status == 'married'
+    violation_codes: [A04]
+    regulatory_reference: "HR-BEN-031 Education Assistance s.1"
+
+  FAMILY:
+    name_en: Family Allowance
+    name_ar: "بدل العائلة"
+    amount_basis: fixed
+    amount: 1200
+    eligibility:
+      all:
+        - marital_status == 'married'
+        - dependents_in_kingdom > 0
+        - spouse_employed_internally == false   # never paid to both spouses
+    violation_codes: [A04, A09]
+    regulatory_reference: "HR-BEN-030 Family Support s.2"
+
+  SHIFT:
+    name_en: Shift Differential
+    name_ar: "بدل المناوبة"
+    amount_basis: pct_of_base
+    rate_pct: 15.0
+    eligibility:
+      all:
+        - work_pattern == 'shift'
+        - grade <= 13
+    violation_codes: [A07]
+    regulatory_reference: "HR-OPS-014 Shift Working s.2"
+
+  ON_CALL:
+    name_en: On-Call Allowance
+    name_ar: "بدل الاستدعاء"
+    amount_basis: fixed
+    amount: 900
+    eligibility:
+      all:
+        - job.safety_critical == true
+        - grade <= 13
+    violation_codes: [A07]
+    regulatory_reference: "HR-OPS-016 Standby Duty s.1"
+
+  CAR:
+    name_en: Company Car Allowance
+    name_ar: "بدل السيارة"
+    amount_basis: grade_table
+    grade_table: {14: 3000, 15: 3000, 16: 4000, 17: 4000, 18: 6000, 19: 6000, 20: 8000}
+    eligibility:
+      all:
+        - grade >= 14
+    violation_codes: [A07, A08]
+    regulatory_reference: "HR-COMP-021 Executive Benefits s.1"
+
+  FUEL:
+    name_en: Fuel Allowance
+    name_ar: "بدل الوقود"
+    amount_basis: fixed
+    amount: 600
+    eligibility:
+      all:
+        - grade >= 9
+        - transport_mode != 'company_bus'
+    violation_codes: [A06, A07]
+    regulatory_reference: "HR-COMP-022 Fuel Support s.1"
+
+  MOBILE:
+    name_en: Mobile / Communications
+    name_ar: "بدل الاتصالات"
+    amount_basis: fixed
+    amount: 250
+    eligibility:
+      all: []                                   # universal
+    violation_codes: []
+    regulatory_reference: "HR-ADM-005 Communications s.1"
+
+  SAFETY:
+    name_en: Safety Equipment Allowance
+    name_ar: "بدل معدات السلامة"
+    amount_basis: fixed
+    amount: 400
+    eligibility:
+      all:
+        - job.safety_critical == true
+        - site.site_class not in ['hq', 'office']
+    violation_codes: [A07, A11]
+    regulatory_reference: "HSE-POL-002 PPE Provision s.3"
+
+  ACTING_ROLE:
+    name_en: Acting Role Allowance
+    name_ar: "بدل التكليف"
+    amount_basis: pct_of_base
+    rate_pct: 12.0
+    max_consecutive_months: 12                  # beyond this -> A12
+    eligibility:
+      all:
+        - acting_role_flag == true
+    violation_codes: [A12]
+    regulatory_reference: "HR-ORG-018 Acting Assignments s.5"
+
+  EXPAT_PREMIUM:
+    name_en: Expatriate Premium
+    name_ar: "علاوة المغترب"
+    amount_basis: pct_of_base
+    rate_pct: 8.0
+    eligibility:
+      all:
+        - nationality_class == 'expat'
+        - grade >= 9
+    violation_codes: [A09]
+    regulatory_reference: "HR-COMP-031 International Assignment s.2"
+    # Nationality-restricted in the opposite direction to SAUDI_DEV_SCHEME:
+    # paying this to a Saudi national is the A09 case.
+
+  SAUDI_DEV_SCHEME:
+    name_en: National Development Scheme
+    name_ar: "برنامج تطوير الكوادر الوطنية"
+    amount_basis: fixed
+    amount: 1500
+    eligibility:
+      all:
+        - nationality_class == 'saudi'
+        - service_years <= 5
+    violation_codes: [A09]
+    regulatory_reference: "HR-NAT-001 Saudization Programme s.2"
+
+  RELOCATION:
+    name_en: Relocation Allowance
+    name_ar: "بدل الانتقال"
+    amount_basis: fixed
+    amount: 3500
+    max_consecutive_months: 6
+    eligibility:
+      all:
+        - months_since_site_change <= 6
+    violation_codes: [A07, A12]
+    regulatory_reference: "HR-MOB-007 Relocation Support s.3"
+
+  SEVERANCE:
+    name_en: End-of-Service Settlement
+    name_ar: "مكافأة نهاية الخدمة"
+    amount_basis: pct_of_base
+    rate_pct: 100.0
+    one_off: true
+    eligibility:
+      all:
+        - status == 'terminated'
+        - service_years >= 2
+    violation_codes: [C04]
+    regulatory_reference: "Saudi Labour Law art.84; HR-SEP-002"
+
+  MEAL:
+    name_en: Meal Allowance
+    name_ar: "بدل الوجبات"
+    amount_basis: fixed
+    amount: 500
+    eligibility:
+      all:
+        - site.camp_available == false          # camps provide messing directly
+        - grade <= 13
+    violation_codes: [A05, A07]
+    regulatory_reference: "HR-ADM-011 Catering s.2"
+
+  FIELD_MESSING:
+    name_en: Field Messing Allowance
+    name_ar: "بدل الإعاشة الميدانية"
+    amount_basis: fixed
+    amount: 750
+    eligibility:
+      all:
+        - site.site_class in ['drilling_camp', 'offshore', 'pump_station']
+        - grade <= 13
+    violation_codes: [A07]
+    regulatory_reference: "HR-ADM-012 Field Catering s.1"
+
+  UNIFORM:
+    name_en: Uniform Allowance
+    name_ar: "بدل الزي"
+    amount_basis: fixed
+    amount: 200
+    eligibility:
+      all:
+        - grade <= 8
+        - site.site_class not in ['hq', 'office']
+    violation_codes: [A07]
+    regulatory_reference: "HR-ADM-009 Workwear s.1"
+
+  TRAVEL_TIME:
+    name_en: Travel Time Compensation
+    name_ar: "بدل وقت السفر"
+    amount_basis: fixed
+    amount: 650
+    eligibility:
+      all:
+        - work_pattern in ['rotation_28_28', 'rotation_14_14']
+        - site.rotation_supported == true
+    violation_codes: [A10]
+    regulatory_reference: "HR-OPS-022 Rotational Travel s.2"
+
+  CERT_PREMIUM:
+    name_en: Certification Premium
+    name_ar: "علاوة الشهادات المهنية"
+    amount_basis: fixed
+    amount: 1100
+    eligibility:
+      all:
+        - has_valid_required_certifications == true
+        - job.safety_critical == true
+    violation_codes: [A11]
+    regulatory_reference: "HR-CMP-004 Professional Certification s.3"
+
+  LANGUAGE:
+    name_en: Language Proficiency Allowance
+    name_ar: "بدل إتقان اللغة"
+    amount_basis: fixed
+    amount: 450
+    eligibility:
+      all:
+        - languages_count >= 2
+        - grade >= 5
+    violation_codes: [A07]
+    regulatory_reference: "HR-CMP-006 Language Skills s.1"
+
+  SECURITY_CLEARANCE:
+    name_en: Security Clearance Allowance
+    name_ar: "بدل التصريح الأمني"
+    amount_basis: fixed
+    amount: 800
+    eligibility:
+      all:
+        - grade >= 9
+        - site.site_class in ['hq', 'refinery', 'plant', 'terminal', 'offshore']
+    violation_codes: [A07]
+    regulatory_reference: "SEC-POL-003 Clearance Levels s.2"
+
+# ---------------------------------------------------------------------------
+# Mutual exclusions — pairs that must never be paid together. These generate
+# the A05 / A06 family directly and are checked as a set, not one by one.
+# ---------------------------------------------------------------------------
+mutual_exclusions:
+  - {codes: [HOUSING], forbidden_when: "housing_type in ['company_camp_bachelor','company_family_housing']", code: A05}
+  - {codes: [TRANSPORT, FUEL], forbidden_when: "transport_mode == 'company_bus'", code: A06}
+  - {codes: [MEAL, FIELD_MESSING], forbidden_when: "both_present", code: A07}
+  - {codes: [EXPAT_PREMIUM, SAUDI_DEV_SCHEME], forbidden_when: "both_present", code: A09}
+  - {codes: [REMOTE_SITE], forbidden_when: "site.site_class in ['hq','office']", code: A01}
+
+# Total allowances as a share of base. Above the ceiling is a B03 candidate,
+# not an automatic violation — a legitimate offshore rotation worker can
+# genuinely approach it, which is exactly the confounder that keeps the
+# evaluation honest.
+allowance_load:
+  expected_ratio_max: 0.55
+  hard_ceiling_ratio: 0.95

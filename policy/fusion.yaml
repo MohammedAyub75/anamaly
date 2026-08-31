@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# policy/fusion.yaml — how the four layers combine into one alert
+#
+# Read by the detector's layer-4 fusion step (phase 6). Everything here is
+# configuration on purpose: the alert budget and the severity thresholds are
+# the two dials a customer will want to turn, and neither should ever require
+# a code change.
+#
+# Contract: docs/EVIDENCE_CONTRACT.md
+# ---------------------------------------------------------------------------
+version: 1
+
+# Each layer's raw score is converted to a percentile rank within the scored
+# population, then to 0-100. Weights apply to those normalised scores.
+layer_weights:
+  rules: 1.00          # layer 1 — a policy violation is a fact, not a probability
+  peer_stats: 0.45     # layer 2 — robust z / MAD, expected-salary residual
+  ml_unsupervised: 0.35 # layer 3 — isolation forest + autoencoder
+  graph: 0.60          # layer 3 — shared IBAN / duplicate ID / manager cycles
+
+# Rule hits dominate. A confirmed layer-1 hit floors the score at this value
+# regardless of what the statistical layers think, because the reviewer can be
+# shown the exact clause that was broken.
+rule_hit_floor: 78
+
+# Corroboration escalates. Independent layers agreeing is far stronger evidence
+# than one layer shouting, so each additional contributing layer adds a bonus.
+corroboration_bonus:
+  two_layers: 6
+  three_layers: 12
+  four_layers: 18
+
+severity_bands:
+  CRITICAL:  {min_score: 88}
+  HIGH:      {min_score: 72}
+  MEDIUM:    {min_score: 55}
+  WATCHLIST: {min_score: 0}
+
+# Thresholds are auto-tuned each run to hit these counts at 1m scale; the
+# bands above are the starting point, not the final answer. Budget is scaled
+# linearly for the 10k and 100k tiers.
+alert_budget:
+  scale_reference: 1m
+  critical: 500
+  high: 5000
+  tolerance_pct: 20        # phase-6 gate: within +/- this of the budget
+  remainder_disposition: watchlist
+
+# Financial impact drives ranking inside a severity band — reviewers work the
+# expensive findings first.
+ranking:
+  within_band_order: [financial_impact_cumulative, score, oldest_first]
+  min_monthly_impact_to_alert: 150   # SAR; below this it is noise, not a case
+
+# Suppression of previously-dismissed findings (phase 13). An alert is
+# suppressed only when the employee, the code, AND the evidence fingerprint
+# all match a prior dismissal — a changed amount is a new finding.
+suppression:
+  enabled: true
+  match_on: [employee_id, anomaly_code, evidence_fingerprint]
+  expires_after_runs: 6
+  resurface_if_impact_increases_pct: 25
+
+# Cohort construction for layer 2, most specific first. The engine walks down
+# this list until a cohort reaches min_size; the key actually used is recorded
+# in the evidence so the reviewer sees what the comparison was against.
+peer_cohort:
+  min_size: 30
+  fallback_order:
+    - [grade, job_family, site_class, nationality_class, service_band]
+    - [grade, job_family, site_class, nationality_class]
+    - [grade, job_family, site_class]
+    - [grade, job_family]
+    - [grade]
+  robust_z_threshold: 3.5      # median/MAD, not mean/sigma
+  percentile_flag_high: 99.0
+  percentile_flag_low: 1.0

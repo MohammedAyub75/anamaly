@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# REFERENCE RULE — this file defines the shape every policy/rules/*.yaml takes.
+#
+# The rule engine that executes these lands in phase 3. A01 is written here in
+# phase 0 because the file format is a contract: datagen's injector, the rule
+# engine, the evidence bundle, and the Policy Explorer screen all agree on it.
+# Copy this file when adding a rule (or use the `add-anomaly-rule` skill).
+#
+# Every field below is load-bearing:
+#   sql_predicate      DuckDB SQL over the feature store; TRUE means violation
+#   evidence_fields    columns copied verbatim into the evidence bundle, so the
+#                      reviewer sees the exact values the rule fired on
+#   description_template  plain English, {placeholders} filled from the row.
+#                      NO ML jargon — a reviewer reads this, not a data scientist
+#   recommended_actions   what to actually do about it
+#   regulatory_reference  the clause that makes it a finding, not an opinion
+# ---------------------------------------------------------------------------
+id: A01
+family: A
+name_en: Remote-site allowance paid at an ineligible site
+name_ar: "بدل موقع نائي في موقع غير مؤهل"
+severity: HIGH
+allowance_code: REMOTE_SITE
+regulatory_reference: "HR-COMP-011 Remote Assignment s.1"
+enabled: true
+
+# The flagship case: an employee posted at Dhahran HQ drawing a remote-site
+# allowance. Deterministic ground truth — the site's own attributes decide it,
+# so this rule is expected to run at 100% precision and 100% recall.
+sql_predicate: |
+  allowance_REMOTE_SITE_amount > 0
+  AND (
+        site_remote_allowance_eligible = FALSE
+     OR site_class IN ('hq', 'office', 'medical', 'training')
+  )
+
+evidence_fields:
+  - employee_id
+  - work_site_id
+  - site_name_en
+  - site_class
+  - site_remote_allowance_eligible
+  - site_hardship_tier
+  - allowance_REMOTE_SITE_amount
+  - first_period_paid
+  - last_period_paid
+  - months_paid
+
+description_template: >
+  Remote-site allowance of SAR {allowance_REMOTE_SITE_amount:,.0f} per month has been paid
+  since {first_period_paid} while the employee is posted to {site_name_en}, which is
+  classified as {site_class} and is not approved for remote-site payments.
+
+financial_impact:
+  monthly_expr: allowance_REMOTE_SITE_amount
+  cumulative_expr: allowance_REMOTE_SITE_amount * months_paid
+
+recommended_actions:
+  - "Suspend the REMOTE_SITE allowance pending review"
+  - "Request site-posting confirmation from Division HR"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+# Legitimate patterns that must NOT fire. A recent transfer from an eligible
+# site can leave one trailing month of allowance in the payroll cycle; that is
+# a posting lag, not a violation.
+exclusions:
+  - "months_since_site_change <= 1 AND previous_site_remote_allowance_eligible = TRUE"

@@ -1,0 +1,267 @@
+# ---------------------------------------------------------------------------
+# policy/sites.yaml — the site reference table (dim_site)
+#
+# 180 sites across all 13 administrative regions of Saudi Arabia. Geography is
+# a genuine analytical dimension here, not a constant: `hardship_tier` and
+# `remote_allowance_eligible` vary site by site, so the SAME allowance is
+# legitimate at Shaybah and a policy violation at Dhahran. That discrimination
+# is exactly what the detector must learn (anomaly codes A01, A02, A03).
+#
+# Attribute resolution
+#   Each site inherits the booleans from `class_defaults[<class>]`. A key
+#   written on the site itself overrides the class default. `hardship_tier`
+#   and `headcount_weight` are always explicit — they are per-site facts, not
+#   class facts.
+#
+# headcount_weight
+#   Relative staffing weight used by the generator to distribute employees.
+#   Deliberately skewed towards the Eastern Province, which is why every map
+#   metric must normalise per 1,000 employees rather than plot raw counts.
+#
+# Coordinates are WGS84 (EPSG:4326) decimal degrees, matching the region
+# polygons in policy/geo/sa_regions.geojson.
+#
+# Contract: docs/DATA_DICTIONARY.md -> dim_site. Gate: python tasks.py verify 0
+# ---------------------------------------------------------------------------
+version: 1
+crs: EPSG:4326
+currency: SAR
+
+class_defaults:
+  hq:            {remote_allowance_eligible: false, offshore_eligible: false, camp_available: false, family_housing_available: true,  rotation_supported: false}
+  office:        {remote_allowance_eligible: false, offshore_eligible: false, camp_available: false, family_housing_available: true,  rotation_supported: false}
+  medical:       {remote_allowance_eligible: false, offshore_eligible: false, camp_available: false, family_housing_available: true,  rotation_supported: false}
+  training:      {remote_allowance_eligible: false, offshore_eligible: false, camp_available: false, family_housing_available: true,  rotation_supported: false}
+  refinery:      {remote_allowance_eligible: false, offshore_eligible: false, camp_available: true,  family_housing_available: true,  rotation_supported: false}
+  plant:         {remote_allowance_eligible: false, offshore_eligible: false, camp_available: true,  family_housing_available: true,  rotation_supported: false}
+  terminal:      {remote_allowance_eligible: false, offshore_eligible: false, camp_available: true,  family_housing_available: false, rotation_supported: false}
+  depot:         {remote_allowance_eligible: false, offshore_eligible: false, camp_available: false, family_housing_available: false, rotation_supported: false}
+  drilling_camp: {remote_allowance_eligible: true,  offshore_eligible: false, camp_available: true,  family_housing_available: false, rotation_supported: true}
+  offshore:      {remote_allowance_eligible: true,  offshore_eligible: true,  camp_available: true,  family_housing_available: false, rotation_supported: true}
+  pump_station:  {remote_allowance_eligible: true,  offshore_eligible: false, camp_available: true,  family_housing_available: false, rotation_supported: true}
+
+regions:
+  - {code: SA-01, name_en: Riyadh,            name_ar: "منطقة الرياض",            centroid_lat: 24.10, centroid_lon: 45.40}
+  - {code: SA-02, name_en: Makkah,            name_ar: "منطقة مكة المكرمة",        centroid_lat: 21.20, centroid_lon: 40.60}
+  - {code: SA-03, name_en: Madinah,           name_ar: "منطقة المدينة المنورة",    centroid_lat: 25.10, centroid_lon: 39.30}
+  - {code: SA-04, name_en: Eastern Province,  name_ar: "المنطقة الشرقية",          centroid_lat: 24.60, centroid_lon: 49.60}
+  - {code: SA-05, name_en: Qassim,            name_ar: "منطقة القصيم",             centroid_lat: 26.20, centroid_lon: 43.60}
+  - {code: SA-06, name_en: Hail,              name_ar: "منطقة حائل",               centroid_lat: 27.40, centroid_lon: 41.60}
+  - {code: SA-07, name_en: Tabuk,             name_ar: "منطقة تبوك",               centroid_lat: 28.20, centroid_lon: 37.00}
+  - {code: SA-08, name_en: Northern Borders,  name_ar: "منطقة الحدود الشمالية",    centroid_lat: 30.40, centroid_lon: 41.60}
+  - {code: SA-09, name_en: Jazan,             name_ar: "منطقة جازان",              centroid_lat: 17.10, centroid_lon: 42.70}
+  - {code: SA-10, name_en: Najran,            name_ar: "منطقة نجران",              centroid_lat: 18.20, centroid_lon: 45.50}
+  - {code: SA-11, name_en: Al Bahah,          name_ar: "منطقة الباحة",             centroid_lat: 20.00, centroid_lon: 41.40}
+  - {code: SA-12, name_en: Al Jawf,           name_ar: "منطقة الجوف",              centroid_lat: 30.20, centroid_lon: 39.30}
+  - {code: SA-14, name_en: Asir,              name_ar: "منطقة عسير",               centroid_lat: 19.20, centroid_lon: 43.00}
+
+# ---------------------------------------------------------------------------
+# Sites
+# ---------------------------------------------------------------------------
+sites:
+
+  # --- SA-04 Eastern Province (46) — the operational heartland -------------
+  - {id: EP-HQ-DHA,  name_en: "Dhahran Headquarters",             name_ar: "المقر الرئيسي بالظهران",        city: Dhahran,       region: SA-04, lat: 26.2794, lon: 50.1583, class: hq,            hardship_tier: 0, headcount_weight: 180}
+  - {id: EP-OFF-DHN, name_en: "Dhahran North Office Park",        name_ar: "مجمع مكاتب الظهران الشمالي",   city: Dhahran,       region: SA-04, lat: 26.3210, lon: 50.1290, class: office,        hardship_tier: 0, headcount_weight: 42}
+  - {id: EP-MED-DHA, name_en: "Dhahran Medical Centre",           name_ar: "المركز الطبي بالظهران",         city: Dhahran,       region: SA-04, lat: 26.2865, lon: 50.1122, class: medical,       hardship_tier: 0, headcount_weight: 24}
+  - {id: EP-TRN-DHA, name_en: "Dhahran Training Centre",          name_ar: "مركز التدريب بالظهران",         city: Dhahran,       region: SA-04, lat: 26.2661, lon: 50.1447, class: training,      hardship_tier: 0, headcount_weight: 20}
+  - {id: EP-PLT-ABQ, name_en: "Abqaiq Plants",                    name_ar: "معامل بقيق",                    city: Abqaiq,        region: SA-04, lat: 25.9350, lon: 49.6700, class: plant,         hardship_tier: 1, headcount_weight: 96}
+  - {id: EP-PLT-ABN, name_en: "Abqaiq NGL Fractionation",         name_ar: "تجزئة سوائل الغاز ببقيق",       city: Abqaiq,        region: SA-04, lat: 25.9120, lon: 49.6950, class: plant,         hardship_tier: 1, headcount_weight: 34}
+  - {id: EP-TRN-ABQ, name_en: "Abqaiq Operations Academy",        name_ar: "أكاديمية العمليات ببقيق",       city: Abqaiq,        region: SA-04, lat: 25.9410, lon: 49.6580, class: training,      hardship_tier: 1, headcount_weight: 10}
+  - {id: EP-REF-RTN, name_en: "Ras Tanura Refinery",              name_ar: "مصفاة رأس تنورة",               city: Ras Tanura,    region: SA-04, lat: 26.6500, lon: 50.1600, class: refinery,      hardship_tier: 1, headcount_weight: 88}
+  - {id: EP-TRM-RTN, name_en: "Ras Tanura Terminal",              name_ar: "ميناء رأس تنورة",               city: Ras Tanura,    region: SA-04, lat: 26.7000, lon: 50.1400, class: terminal,      hardship_tier: 1, headcount_weight: 46}
+  - {id: EP-PLT-RTG, name_en: "Ras Tanura Gas Plant",             name_ar: "معمل غاز رأس تنورة",            city: Ras Tanura,    region: SA-04, lat: 26.6300, lon: 50.1900, class: plant,         hardship_tier: 1, headcount_weight: 26}
+  - {id: EP-MED-RTN, name_en: "Ras Tanura Clinic",                name_ar: "عيادة رأس تنورة",               city: Ras Tanura,    region: SA-04, lat: 26.6420, lon: 50.1520, class: medical,       hardship_tier: 1, headcount_weight: 8}
+  - {id: EP-PLT-JUB, name_en: "Jubail Industrial Complex",        name_ar: "المجمع الصناعي بالجبيل",        city: Jubail,        region: SA-04, lat: 27.0000, lon: 49.6600, class: plant,         hardship_tier: 1, headcount_weight: 78}
+  - {id: EP-REF-JUB, name_en: "Jubail Refinery",                  name_ar: "مصفاة الجبيل",                  city: Jubail,        region: SA-04, lat: 26.9600, lon: 49.6100, class: refinery,      hardship_tier: 1, headcount_weight: 62}
+  - {id: EP-TRM-JUB, name_en: "Jubail Commercial Terminal",       name_ar: "ميناء الجبيل التجاري",          city: Jubail,        region: SA-04, lat: 27.0100, lon: 49.6600, class: terminal,      hardship_tier: 1, headcount_weight: 30}
+  - {id: EP-OFF-JUB, name_en: "Jubail Operations Office",         name_ar: "مكتب عمليات الجبيل",            city: Jubail,        region: SA-04, lat: 27.0050, lon: 49.6480, class: office,        hardship_tier: 0, headcount_weight: 24}
+  - {id: EP-OFF-KHB, name_en: "Khobar Regional Office",           name_ar: "المكتب الإقليمي بالخبر",        city: Al Khobar,     region: SA-04, lat: 26.2794, lon: 50.2083, class: office,        hardship_tier: 0, headcount_weight: 38}
+  - {id: EP-OFF-DMM, name_en: "Dammam Corporate Office",          name_ar: "المكتب الرئيسي بالدمام",        city: Dammam,        region: SA-04, lat: 26.4207, lon: 50.0888, class: office,        hardship_tier: 0, headcount_weight: 34}
+  - {id: EP-DEP-DMM, name_en: "Dammam Distribution Depot",        name_ar: "مستودع التوزيع بالدمام",        city: Dammam,        region: SA-04, lat: 26.3900, lon: 50.0500, class: depot,         hardship_tier: 0, headcount_weight: 18}
+  - {id: EP-TRM-DMM, name_en: "King Abdulaziz Port Terminal",     name_ar: "ميناء الملك عبدالعزيز",         city: Dammam,        region: SA-04, lat: 26.5000, lon: 50.2050, class: terminal,      hardship_tier: 0, headcount_weight: 20}
+  - {id: EP-OFF-HOF, name_en: "Hofuf Area Office",                name_ar: "مكتب منطقة الهفوف",             city: Hofuf,         region: SA-04, lat: 25.3800, lon: 49.5900, class: office,        hardship_tier: 0, headcount_weight: 22}
+  - {id: EP-DEP-HOF, name_en: "Hofuf Materials Depot",            name_ar: "مستودع المواد بالهفوف",         city: Hofuf,         region: SA-04, lat: 25.3550, lon: 49.6200, class: depot,         hardship_tier: 1, headcount_weight: 12}
+  - {id: EP-PLT-HRS, name_en: "Khurais Producing Facility",       name_ar: "منشأة إنتاج خريص",              city: Khurais,       region: SA-04, lat: 25.0500, lon: 48.1000, class: plant,         hardship_tier: 2, headcount_weight: 44, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-CMP-HRS, name_en: "Khurais Field Camp",               name_ar: "مخيم خريص الميداني",            city: Khurais,       region: SA-04, lat: 25.0300, lon: 48.0700, class: drilling_camp, hardship_tier: 2, headcount_weight: 20}
+  - {id: EP-PLT-SHY, name_en: "Shaybah Central Processing",       name_ar: "معالجة شيبة المركزية",          city: Shaybah,       region: SA-04, lat: 22.5140, lon: 53.9700, class: plant,         hardship_tier: 3, headcount_weight: 40, remote_allowance_eligible: true, rotation_supported: true, family_housing_available: false}
+  - {id: EP-CMP-SHY, name_en: "Shaybah Residential Camp",         name_ar: "مخيم شيبة السكني",              city: Shaybah,       region: SA-04, lat: 22.5030, lon: 53.9450, class: drilling_camp, hardship_tier: 3, headcount_weight: 24}
+  - {id: EP-PLT-SHN, name_en: "Shaybah NGL Recovery",             name_ar: "استخلاص سوائل الغاز بشيبة",     city: Shaybah,       region: SA-04, lat: 22.5320, lon: 53.9880, class: plant,         hardship_tier: 3, headcount_weight: 18, remote_allowance_eligible: true, rotation_supported: true, family_housing_available: false}
+  - {id: EP-PLT-MAN, name_en: "Manifa Central Processing",        name_ar: "معالجة منيفة المركزية",         city: Manifa,        region: SA-04, lat: 27.7000, lon: 48.9000, class: plant,         hardship_tier: 2, headcount_weight: 36, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-CMP-MAN, name_en: "Manifa Field Camp",                name_ar: "مخيم منيفة الميداني",           city: Manifa,        region: SA-04, lat: 27.6700, lon: 48.8600, class: drilling_camp, hardship_tier: 2, headcount_weight: 16}
+  - {id: EP-OFS-SAF, name_en: "Safaniya Offshore Complex",        name_ar: "مجمع السفانية البحري",          city: Safaniya,      region: SA-04, lat: 28.0000, lon: 48.7000, class: offshore,      hardship_tier: 3, headcount_weight: 34}
+  - {id: EP-OFS-SFN, name_en: "Safaniya North Platform",          name_ar: "منصة السفانية الشمالية",        city: Safaniya,      region: SA-04, lat: 28.1500, lon: 48.6000, class: offshore,      hardship_tier: 3, headcount_weight: 14}
+  - {id: EP-OFS-MRJ, name_en: "Marjan Offshore Platform",         name_ar: "منصة مرجان البحرية",            city: Marjan,        region: SA-04, lat: 28.2000, lon: 49.3000, class: offshore,      hardship_tier: 3, headcount_weight: 22}
+  - {id: EP-OFS-ZUL, name_en: "Zuluf Offshore Platform",          name_ar: "منصة زلف البحرية",              city: Zuluf,         region: SA-04, lat: 28.4000, lon: 49.0000, class: offshore,      hardship_tier: 3, headcount_weight: 20}
+  - {id: EP-OFS-BRI, name_en: "Berri Offshore Gathering",         name_ar: "تجميع بري البحري",              city: Berri,         region: SA-04, lat: 27.2000, lon: 49.6000, class: offshore,      hardship_tier: 3, headcount_weight: 18}
+  - {id: EP-PLT-BRI, name_en: "Berri Gas Plant",                  name_ar: "معمل غاز بري",                  city: Jubail,        region: SA-04, lat: 27.0500, lon: 49.5500, class: plant,         hardship_tier: 1, headcount_weight: 30}
+  - {id: EP-OFF-QTF, name_en: "Qatif Producing Office",           name_ar: "مكتب إنتاج القطيف",             city: Qatif,         region: SA-04, lat: 26.5600, lon: 50.0100, class: office,        hardship_tier: 0, headcount_weight: 16}
+  - {id: EP-PLT-QTF, name_en: "Qatif Gas-Oil Separation Plant",   name_ar: "معمل فصل الغاز والزيت بالقطيف", city: Qatif,         region: SA-04, lat: 26.5100, lon: 49.9600, class: plant,         hardship_tier: 1, headcount_weight: 26}
+  - {id: EP-PLT-UTH, name_en: "Uthmaniyah Gas Plant",             name_ar: "معمل غاز العثمانية",            city: Uthmaniyah,    region: SA-04, lat: 25.1000, lon: 49.3000, class: plant,         hardship_tier: 2, headcount_weight: 32, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-PLT-HWY, name_en: "Hawiyah Gas Plant",                name_ar: "معمل غاز الحوية",               city: Hawiyah,       region: SA-04, lat: 24.9500, lon: 49.3500, class: plant,         hardship_tier: 2, headcount_weight: 30, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-PLT-HRD, name_en: "Haradh Gas Plant",                 name_ar: "معمل غاز حرض",                  city: Haradh,        region: SA-04, lat: 24.1400, lon: 49.0700, class: plant,         hardship_tier: 2, headcount_weight: 28, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-CMP-HRD, name_en: "Haradh Field Camp",                name_ar: "مخيم حرض الميداني",             city: Haradh,        region: SA-04, lat: 24.1100, lon: 49.0300, class: drilling_camp, hardship_tier: 2, headcount_weight: 14}
+  - {id: EP-PLT-GHW, name_en: "Ghawar North Producing",           name_ar: "إنتاج الغوار الشمالي",          city: Ain Dar,       region: SA-04, lat: 25.7000, lon: 49.3000, class: plant,         hardship_tier: 2, headcount_weight: 26, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-CMP-ADR, name_en: "Ain Dar Camp",                     name_ar: "مخيم عين دار",                  city: Ain Dar,       region: SA-04, lat: 25.6800, lon: 49.2700, class: drilling_camp, hardship_tier: 2, headcount_weight: 12}
+  - {id: EP-PLT-KHR, name_en: "Khursaniyah Gas Plant",            name_ar: "معمل غاز الخرسانية",            city: Khursaniyah,   region: SA-04, lat: 27.2200, lon: 49.2000, class: plant,         hardship_tier: 2, headcount_weight: 24, remote_allowance_eligible: true, rotation_supported: true}
+  - {id: EP-DEP-KHR, name_en: "Khursaniyah Depot",                name_ar: "مستودع الخرسانية",              city: Khursaniyah,   region: SA-04, lat: 27.2500, lon: 49.2500, class: depot,         hardship_tier: 2, headcount_weight: 10, remote_allowance_eligible: true}
+  - {id: EP-PMP-P01, name_en: "Pump Station 1 (East-West Line)",  name_ar: "محطة الضخ ١ - الخط الشرقي الغربي", city: Abqaiq,     region: SA-04, lat: 25.7000, lon: 48.9000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+  - {id: EP-PMP-P03, name_en: "Pump Station 3 (East-West Line)",  name_ar: "محطة الضخ ٣ - الخط الشرقي الغربي", city: Nuayriyah,  region: SA-04, lat: 27.4500, lon: 48.4500, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+
+  # --- SA-01 Riyadh (24) ---------------------------------------------------
+  - {id: RY-OFF-COR, name_en: "Riyadh Corporate Office",          name_ar: "المكتب الرئيسي بالرياض",        city: Riyadh,        region: SA-01, lat: 24.7136, lon: 46.6753, class: office,        hardship_tier: 0, headcount_weight: 60}
+  - {id: RY-OFF-KAF, name_en: "Riyadh Financial District Office", name_ar: "مكتب المركز المالي بالرياض",    city: Riyadh,        region: SA-01, lat: 24.7600, lon: 46.6400, class: office,        hardship_tier: 0, headcount_weight: 30}
+  - {id: RY-REF-RYD, name_en: "Riyadh Refinery",                  name_ar: "مصفاة الرياض",                  city: Riyadh,        region: SA-01, lat: 24.5600, lon: 46.8500, class: refinery,      hardship_tier: 1, headcount_weight: 48}
+  - {id: RY-TRM-RYD, name_en: "Riyadh Products Terminal",         name_ar: "مستودع منتجات الرياض",          city: Riyadh,        region: SA-01, lat: 24.5900, lon: 46.8800, class: terminal,      hardship_tier: 1, headcount_weight: 20}
+  - {id: RY-DEP-RYD, name_en: "Riyadh North Depot",               name_ar: "مستودع الرياض الشمالي",         city: Riyadh,        region: SA-01, lat: 24.8400, lon: 46.7200, class: depot,         hardship_tier: 0, headcount_weight: 14}
+  - {id: RY-TRN-RYD, name_en: "Riyadh Training Institute",        name_ar: "معهد التدريب بالرياض",          city: Riyadh,        region: SA-01, lat: 24.6900, lon: 46.7300, class: training,      hardship_tier: 0, headcount_weight: 16}
+  - {id: RY-MED-RYD, name_en: "Riyadh Employee Clinic",           name_ar: "عيادة الموظفين بالرياض",        city: Riyadh,        region: SA-01, lat: 24.7000, lon: 46.6900, class: medical,       hardship_tier: 0, headcount_weight: 10}
+  - {id: RY-TRN-RYS, name_en: "Riyadh HSE Academy",               name_ar: "أكاديمية السلامة بالرياض",      city: Riyadh,        region: SA-01, lat: 24.6300, lon: 46.7700, class: training,      hardship_tier: 0, headcount_weight: 9}
+  - {id: RY-OFF-RYL, name_en: "Riyadh Logistics Centre",          name_ar: "مركز الخدمات اللوجستية بالرياض", city: Riyadh,       region: SA-01, lat: 24.6000, lon: 46.8000, class: office,        hardship_tier: 0, headcount_weight: 12}
+  - {id: RY-DEP-KHJ, name_en: "Kharj Distribution Depot",         name_ar: "مستودع التوزيع بالخرج",         city: Al Kharj,      region: SA-01, lat: 24.1550, lon: 47.3350, class: depot,         hardship_tier: 1, headcount_weight: 14}
+  - {id: RY-PLT-KHJ, name_en: "Kharj Bulk Plant",                 name_ar: "معمل التعبئة بالخرج",           city: Al Kharj,      region: SA-01, lat: 24.1200, lon: 47.3000, class: plant,         hardship_tier: 1, headcount_weight: 12}
+  - {id: RY-OFF-DWD, name_en: "Dawadmi Field Operations Office",  name_ar: "مكتب العمليات الميدانية بالدوادمي", city: Dawadmi,   region: SA-01, lat: 24.5070, lon: 44.3930, class: office,        hardship_tier: 2, headcount_weight: 10, remote_allowance_eligible: true}
+  - {id: RY-CMP-DWD, name_en: "Dawadmi Exploration Camp",         name_ar: "مخيم الاستكشاف بالدوادمي",      city: Dawadmi,       region: SA-01, lat: 24.4600, lon: 44.3200, class: drilling_camp, hardship_tier: 2, headcount_weight: 12}
+  - {id: RY-DEP-MJM, name_en: "Majmaah Depot",                    name_ar: "مستودع المجمعة",                city: Al Majmaah,    region: SA-01, lat: 25.9000, lon: 45.3450, class: depot,         hardship_tier: 1, headcount_weight: 8}
+  - {id: RY-PMP-P06, name_en: "Pump Station 6 (East-West Line)",  name_ar: "محطة الضخ ٦ - الخط الشرقي الغربي", city: Al Quwaiiyah, region: SA-01, lat: 24.0700, lon: 45.2800, class: pump_station, hardship_tier: 2, headcount_weight: 6}
+  - {id: RY-PMP-P07, name_en: "Pump Station 7 (East-West Line)",  name_ar: "محطة الضخ ٧ - الخط الشرقي الغربي", city: Dawadmi,   region: SA-01, lat: 24.3000, lon: 44.6000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+  - {id: RY-OFF-ZLF, name_en: "Zulfi Area Office",                name_ar: "مكتب منطقة الزلفي",             city: Az Zulfi,      region: SA-01, lat: 26.2990, lon: 44.8140, class: office,        hardship_tier: 1, headcount_weight: 8}
+  - {id: RY-DEP-AFL, name_en: "Aflaj Depot",                      name_ar: "مستودع الأفلاج",                city: Layla,         region: SA-01, lat: 22.2860, lon: 46.7230, class: depot,         hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: RY-CMP-SLY, name_en: "Sulayyil Field Camp",              name_ar: "مخيم السليل الميداني",          city: As Sulayyil,   region: SA-01, lat: 20.4600, lon: 45.5700, class: drilling_camp, hardship_tier: 3, headcount_weight: 10}
+  - {id: RY-OFF-SLY, name_en: "Sulayyil Area Office",             name_ar: "مكتب منطقة السليل",             city: As Sulayyil,   region: SA-01, lat: 20.4610, lon: 45.5760, class: office,        hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: RY-DEP-WSM, name_en: "Wadi ad-Dawasir Depot",            name_ar: "مستودع وادي الدواسر",           city: Wadi ad-Dawasir, region: SA-01, lat: 20.4670, lon: 44.7900, class: depot,       hardship_tier: 2, headcount_weight: 8, remote_allowance_eligible: true}
+  - {id: RY-CMP-WSM, name_en: "Wadi ad-Dawasir Exploration Camp", name_ar: "مخيم الاستكشاف بوادي الدواسر",  city: Wadi ad-Dawasir, region: SA-01, lat: 20.4200, lon: 44.7400, class: drilling_camp, hardship_tier: 3, headcount_weight: 9}
+  - {id: RY-OFF-SHQ, name_en: "Shaqra Area Office",               name_ar: "مكتب منطقة شقراء",              city: Shaqra,        region: SA-01, lat: 25.2450, lon: 45.2500, class: office,        hardship_tier: 1, headcount_weight: 6}
+  - {id: RY-DEP-HTA, name_en: "Hotat Bani Tamim Depot",           name_ar: "مستودع حوطة بني تميم",          city: Hotat Bani Tamim, region: SA-01, lat: 23.5150, lon: 46.8600, class: depot,      hardship_tier: 1, headcount_weight: 6}
+
+  # --- SA-02 Makkah (20) ---------------------------------------------------
+  - {id: MK-OFF-JED, name_en: "Jeddah Regional Office",           name_ar: "المكتب الإقليمي بجدة",          city: Jeddah,        region: SA-02, lat: 21.4858, lon: 39.1925, class: office,        hardship_tier: 0, headcount_weight: 46}
+  - {id: MK-TRM-JED, name_en: "Jeddah Marine Terminal",           name_ar: "الميناء البحري بجدة",           city: Jeddah,        region: SA-02, lat: 21.4700, lon: 39.1500, class: terminal,      hardship_tier: 1, headcount_weight: 30}
+  - {id: MK-REF-JED, name_en: "Jeddah Refinery Support Centre",   name_ar: "مركز دعم مصفاة جدة",            city: Jeddah,        region: SA-02, lat: 21.4200, lon: 39.1800, class: refinery,      hardship_tier: 1, headcount_weight: 24}
+  - {id: MK-DEP-JED, name_en: "Jeddah South Depot",               name_ar: "مستودع جدة الجنوبي",            city: Jeddah,        region: SA-02, lat: 21.3600, lon: 39.2200, class: depot,         hardship_tier: 0, headcount_weight: 16}
+  - {id: MK-MED-JED, name_en: "Jeddah Employee Clinic",           name_ar: "عيادة الموظفين بجدة",           city: Jeddah,        region: SA-02, lat: 21.5400, lon: 39.1700, class: medical,       hardship_tier: 0, headcount_weight: 9}
+  - {id: MK-TRN-JED, name_en: "Jeddah Training Centre",           name_ar: "مركز التدريب بجدة",             city: Jeddah,        region: SA-02, lat: 21.5600, lon: 39.2000, class: training,      hardship_tier: 0, headcount_weight: 12}
+  - {id: MK-PLT-RAB, name_en: "Rabigh Refining & Petrochemical",  name_ar: "مجمع رابغ للتكرير والبتروكيماويات", city: Rabigh,    region: SA-02, lat: 22.7000, lon: 39.0300, class: plant,         hardship_tier: 1, headcount_weight: 58}
+  - {id: MK-TRM-RAB, name_en: "Rabigh Marine Terminal",           name_ar: "الميناء البحري برابغ",          city: Rabigh,        region: SA-02, lat: 22.7500, lon: 38.9800, class: terminal,      hardship_tier: 1, headcount_weight: 22}
+  - {id: MK-CMP-RAB, name_en: "Rabigh Contractor Camp",           name_ar: "مخيم المقاولين برابغ",          city: Rabigh,        region: SA-02, lat: 22.6700, lon: 39.0600, class: drilling_camp, hardship_tier: 1, headcount_weight: 18}
+  - {id: MK-OFF-RAB, name_en: "Rabigh Site Office",               name_ar: "مكتب موقع رابغ",                city: Rabigh,        region: SA-02, lat: 22.7080, lon: 39.0350, class: office,        hardship_tier: 1, headcount_weight: 12}
+  - {id: MK-OFF-KAE, name_en: "King Abdullah Economic City Office", name_ar: "مكتب مدينة الملك عبدالله الاقتصادية", city: Rabigh, region: SA-02, lat: 22.4300, lon: 39.1200, class: office,      hardship_tier: 0, headcount_weight: 14}
+  - {id: MK-TRM-KAE, name_en: "KAEC Industrial Terminal",         name_ar: "الميناء الصناعي بمدينة الملك عبدالله", city: Rabigh, region: SA-02, lat: 22.4000, lon: 39.0900, class: terminal,     hardship_tier: 1, headcount_weight: 12}
+  - {id: MK-DEP-TAF, name_en: "Taif Distribution Depot",          name_ar: "مستودع التوزيع بالطائف",        city: Taif,          region: SA-02, lat: 21.2703, lon: 40.4158, class: depot,         hardship_tier: 1, headcount_weight: 14}
+  - {id: MK-OFF-TAF, name_en: "Taif Area Office",                 name_ar: "مكتب منطقة الطائف",             city: Taif,          region: SA-02, lat: 21.2800, lon: 40.4200, class: office,        hardship_tier: 1, headcount_weight: 10}
+  - {id: MK-OFF-MAK, name_en: "Makkah Area Office",               name_ar: "مكتب منطقة مكة",                city: Makkah,        region: SA-02, lat: 21.3891, lon: 39.8579, class: office,        hardship_tier: 0, headcount_weight: 18}
+  - {id: MK-DEP-MAK, name_en: "Makkah Bulk Depot",                name_ar: "مستودع مكة الرئيسي",            city: Makkah,        region: SA-02, lat: 21.3500, lon: 39.8200, class: depot,         hardship_tier: 0, headcount_weight: 11}
+  - {id: MK-DEP-LTH, name_en: "Al Lith Depot",                    name_ar: "مستودع الليث",                  city: Al Lith,       region: SA-02, lat: 20.1500, lon: 40.2700, class: depot,         hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: MK-DEP-QNF, name_en: "Al Qunfudhah Depot",               name_ar: "مستودع القنفذة",                city: Al Qunfudhah,  region: SA-02, lat: 19.1300, lon: 41.0800, class: depot,         hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: MK-PMP-P09, name_en: "Pump Station 9 (East-West Line)",  name_ar: "محطة الضخ ٩ - الخط الشرقي الغربي", city: Rabigh,     region: SA-02, lat: 22.5000, lon: 39.5000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+  - {id: MK-PMP-P08, name_en: "Pump Station 8 (East-West Line)",  name_ar: "محطة الضخ ٨ - الخط الشرقي الغربي", city: Turubah,    region: SA-02, lat: 23.0000, lon: 41.0000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+
+  # --- SA-03 Madinah (16) --------------------------------------------------
+  - {id: MD-REF-YNB, name_en: "Yanbu Refinery",                   name_ar: "مصفاة ينبع",                    city: Yanbu,         region: SA-03, lat: 24.0890, lon: 38.0640, class: refinery,      hardship_tier: 1, headcount_weight: 66}
+  - {id: MD-PLT-YNG, name_en: "Yanbu NGL Fractionation Plant",    name_ar: "معمل تجزئة سوائل الغاز بينبع",  city: Yanbu,         region: SA-03, lat: 24.0600, lon: 38.1200, class: plant,         hardship_tier: 1, headcount_weight: 40}
+  - {id: MD-TRM-YNB, name_en: "Yanbu Marine Terminal",            name_ar: "الميناء البحري بينبع",          city: Yanbu,         region: SA-03, lat: 24.1000, lon: 38.0400, class: terminal,      hardship_tier: 1, headcount_weight: 28}
+  - {id: MD-OFF-YNB, name_en: "Yanbu Operations Office",          name_ar: "مكتب العمليات بينبع",           city: Yanbu,         region: SA-03, lat: 24.0850, lon: 38.0700, class: office,        hardship_tier: 0, headcount_weight: 20}
+  - {id: MD-CMP-YNB, name_en: "Yanbu Bachelor Camp",              name_ar: "مخيم العزاب بينبع",             city: Yanbu,         region: SA-03, lat: 24.0700, lon: 38.0900, class: drilling_camp, hardship_tier: 1, headcount_weight: 16, remote_allowance_eligible: false}
+  - {id: MD-MED-YNB, name_en: "Yanbu Medical Centre",             name_ar: "المركز الطبي بينبع",            city: Yanbu,         region: SA-03, lat: 24.0920, lon: 38.0750, class: medical,       hardship_tier: 1, headcount_weight: 10}
+  - {id: MD-TRN-YNB, name_en: "Yanbu Technical Academy",          name_ar: "الأكاديمية التقنية بينبع",      city: Yanbu,         region: SA-03, lat: 24.0780, lon: 38.0980, class: training,      hardship_tier: 1, headcount_weight: 12}
+  - {id: MD-OFF-MDN, name_en: "Madinah Regional Office",          name_ar: "المكتب الإقليمي بالمدينة",      city: Madinah,       region: SA-03, lat: 24.4686, lon: 39.6142, class: office,        hardship_tier: 0, headcount_weight: 22}
+  - {id: MD-DEP-MDN, name_en: "Madinah Distribution Depot",       name_ar: "مستودع التوزيع بالمدينة",       city: Madinah,       region: SA-03, lat: 24.4200, lon: 39.5800, class: depot,         hardship_tier: 0, headcount_weight: 14}
+  - {id: MD-CMP-BDR, name_en: "Badr Field Camp",                  name_ar: "مخيم بدر الميداني",             city: Badr,          region: SA-03, lat: 23.7800, lon: 38.7900, class: drilling_camp, hardship_tier: 2, headcount_weight: 12}
+  - {id: MD-OFF-BDR, name_en: "Badr Field Office",                name_ar: "المكتب الميداني ببدر",          city: Badr,          region: SA-03, lat: 23.7850, lon: 38.7950, class: office,        hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: MD-DEP-ULA, name_en: "Al Ula Depot",                     name_ar: "مستودع العلا",                  city: Al Ula,        region: SA-03, lat: 26.6090, lon: 37.9220, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: MD-DEP-KHY, name_en: "Khaybar Depot",                    name_ar: "مستودع خيبر",                   city: Khaybar,       region: SA-03, lat: 25.6980, lon: 39.2920, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: MD-OFF-MHD, name_en: "Mahd adh Dhahab Area Office",      name_ar: "مكتب منطقة مهد الذهب",          city: Mahd adh Dhahab, region: SA-03, lat: 23.4900, lon: 40.8600, class: office,      hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: MD-CMP-MHD, name_en: "Mahd adh Dhahab Exploration Camp", name_ar: "مخيم الاستكشاف بمهد الذهب",     city: Mahd adh Dhahab, region: SA-03, lat: 23.4600, lon: 40.8200, class: drilling_camp, hardship_tier: 3, headcount_weight: 8}
+  - {id: MD-PMP-P10, name_en: "Pump Station 10 (East-West Line)", name_ar: "محطة الضخ ١٠ - الخط الشرقي الغربي", city: Yanbu,     region: SA-03, lat: 24.2000, lon: 38.5000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+
+  # --- SA-09 Jazan (12) ----------------------------------------------------
+  - {id: JZ-REF-JZN, name_en: "Jazan Refinery",                   name_ar: "مصفاة جازان",                   city: Jazan,         region: SA-09, lat: 16.9000, lon: 42.5500, class: refinery,      hardship_tier: 2, headcount_weight: 54, remote_allowance_eligible: true}
+  - {id: JZ-TRM-JZN, name_en: "Jazan Marine Terminal",            name_ar: "الميناء البحري بجازان",         city: Jazan,         region: SA-09, lat: 16.8900, lon: 42.5100, class: terminal,      hardship_tier: 2, headcount_weight: 26, remote_allowance_eligible: true}
+  - {id: JZ-PLT-JZN, name_en: "Jazan Gasification Plant",         name_ar: "معمل التغويز بجازان",           city: Jazan,         region: SA-09, lat: 16.9200, lon: 42.5800, class: plant,         hardship_tier: 2, headcount_weight: 30, remote_allowance_eligible: true}
+  - {id: JZ-CMP-JZN, name_en: "Jazan Construction Camp",          name_ar: "مخيم الإنشاءات بجازان",         city: Jazan,         region: SA-09, lat: 16.8700, lon: 42.6000, class: drilling_camp, hardship_tier: 2, headcount_weight: 20}
+  - {id: JZ-OFF-JZN, name_en: "Jazan Economic City Office",       name_ar: "مكتب مدينة جازان الاقتصادية",   city: Jazan,         region: SA-09, lat: 16.8800, lon: 42.5600, class: office,        hardship_tier: 1, headcount_weight: 16}
+  - {id: JZ-MED-JZN, name_en: "Jazan Site Clinic",                name_ar: "عيادة موقع جازان",              city: Jazan,         region: SA-09, lat: 16.8950, lon: 42.5450, class: medical,       hardship_tier: 2, headcount_weight: 8}
+  - {id: JZ-TRN-JZN, name_en: "Jazan Technical Training Centre",  name_ar: "مركز التدريب التقني بجازان",    city: Jazan,         region: SA-09, lat: 16.9050, lon: 42.5700, class: training,      hardship_tier: 2, headcount_weight: 9}
+  - {id: JZ-OFF-JIZ, name_en: "Jizan City Office",                name_ar: "مكتب مدينة جيزان",              city: Jizan,         region: SA-09, lat: 16.8892, lon: 42.5511, class: office,        hardship_tier: 1, headcount_weight: 12}
+  - {id: JZ-DEP-SBY, name_en: "Sabya Depot",                      name_ar: "مستودع صبيا",                   city: Sabya,         region: SA-09, lat: 17.1490, lon: 42.6250, class: depot,         hardship_tier: 2, headcount_weight: 8, remote_allowance_eligible: true}
+  - {id: JZ-DEP-ABS, name_en: "Abu Arish Depot",                  name_ar: "مستودع أبو عريش",               city: Abu Arish,     region: SA-09, lat: 16.9690, lon: 42.8320, class: depot,         hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: JZ-DEP-SAM, name_en: "Samtah Depot",                     name_ar: "مستودع صامطة",                  city: Samtah,        region: SA-09, lat: 16.5960, lon: 42.9400, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: JZ-CMP-FRS, name_en: "Farasan Island Support Base",      name_ar: "قاعدة الدعم بجزيرة فرسان",      city: Farasan,       region: SA-09, lat: 16.7000, lon: 42.1200, class: drilling_camp, hardship_tier: 3, headcount_weight: 7}
+
+  # --- SA-14 Asir (10) -----------------------------------------------------
+  - {id: AS-OFF-ABH, name_en: "Abha Regional Office",             name_ar: "المكتب الإقليمي بأبها",         city: Abha,          region: SA-14, lat: 18.2164, lon: 42.5053, class: office,        hardship_tier: 1, headcount_weight: 18}
+  - {id: AS-DEP-KHM, name_en: "Khamis Mushait Depot",             name_ar: "مستودع خميس مشيط",              city: Khamis Mushait, region: SA-14, lat: 18.3060, lon: 42.7290, class: depot,        hardship_tier: 1, headcount_weight: 14}
+  - {id: AS-OFF-KHM, name_en: "Khamis Mushait Area Office",       name_ar: "مكتب منطقة خميس مشيط",          city: Khamis Mushait, region: SA-14, lat: 18.3000, lon: 42.7350, class: office,       hardship_tier: 1, headcount_weight: 10}
+  - {id: AS-MED-ABH, name_en: "Abha Employee Clinic",             name_ar: "عيادة الموظفين بأبها",          city: Abha,          region: SA-14, lat: 18.2200, lon: 42.5100, class: medical,       hardship_tier: 1, headcount_weight: 7}
+  - {id: AS-TRN-ABH, name_en: "Abha Training Centre",             name_ar: "مركز التدريب بأبها",            city: Abha,          region: SA-14, lat: 18.2300, lon: 42.4900, class: training,      hardship_tier: 1, headcount_weight: 8}
+  - {id: AS-DEP-BSH, name_en: "Bisha Depot",                      name_ar: "مستودع بيشة",                   city: Bisha,         region: SA-14, lat: 19.9970, lon: 42.5900, class: depot,         hardship_tier: 2, headcount_weight: 8, remote_allowance_eligible: true}
+  - {id: AS-CMP-BSH, name_en: "Bisha Field Camp",                 name_ar: "مخيم بيشة الميداني",            city: Bisha,         region: SA-14, lat: 19.9600, lon: 42.5500, class: drilling_camp, hardship_tier: 2, headcount_weight: 8}
+  - {id: AS-DEP-NMS, name_en: "An Namas Depot",                   name_ar: "مستودع النماص",                 city: An Namas,      region: SA-14, lat: 19.1500, lon: 42.1200, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: AS-DEP-MHY, name_en: "Muhayil Depot",                    name_ar: "مستودع محايل",                  city: Muhayil,       region: SA-14, lat: 18.5500, lon: 42.0500, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: AS-PMP-S02, name_en: "Southern Line Pump Station 2",     name_ar: "محطة ضخ الخط الجنوبي ٢",        city: Bisha,         region: SA-14, lat: 19.7000, lon: 42.7000, class: pump_station,  hardship_tier: 2, headcount_weight: 5}
+
+  # --- SA-05 Qassim (9) ----------------------------------------------------
+  - {id: QS-OFF-BUR, name_en: "Buraydah Regional Office",         name_ar: "المكتب الإقليمي ببريدة",        city: Buraydah,      region: SA-05, lat: 26.3260, lon: 43.9750, class: office,        hardship_tier: 1, headcount_weight: 18}
+  - {id: QS-DEP-BUR, name_en: "Buraydah Distribution Depot",      name_ar: "مستودع التوزيع ببريدة",         city: Buraydah,      region: SA-05, lat: 26.3000, lon: 43.9400, class: depot,         hardship_tier: 1, headcount_weight: 12}
+  - {id: QS-TRN-BUR, name_en: "Buraydah Training Centre",         name_ar: "مركز التدريب ببريدة",           city: Buraydah,      region: SA-05, lat: 26.3300, lon: 43.9600, class: training,      hardship_tier: 1, headcount_weight: 7}
+  - {id: QS-MED-BUR, name_en: "Buraydah Clinic",                  name_ar: "عيادة بريدة",                   city: Buraydah,      region: SA-05, lat: 26.3200, lon: 43.9700, class: medical,       hardship_tier: 1, headcount_weight: 5}
+  - {id: QS-DEP-UNZ, name_en: "Unayzah Depot",                    name_ar: "مستودع عنيزة",                  city: Unayzah,       region: SA-05, lat: 26.0840, lon: 43.9930, class: depot,         hardship_tier: 1, headcount_weight: 9}
+  - {id: QS-OFF-UNZ, name_en: "Unayzah Area Office",              name_ar: "مكتب منطقة عنيزة",              city: Unayzah,       region: SA-05, lat: 26.0900, lon: 43.9980, class: office,        hardship_tier: 1, headcount_weight: 7}
+  - {id: QS-DEP-RSS, name_en: "Ar Rass Depot",                    name_ar: "مستودع الرس",                   city: Ar Rass,       region: SA-05, lat: 25.8670, lon: 43.5040, class: depot,         hardship_tier: 1, headcount_weight: 7}
+  - {id: QS-CMP-QSM, name_en: "Qassim Exploration Camp",          name_ar: "مخيم الاستكشاف بالقصيم",        city: Buraydah,      region: SA-05, lat: 26.6000, lon: 43.4000, class: drilling_camp, hardship_tier: 2, headcount_weight: 8}
+  - {id: QS-PMP-P05, name_en: "Pump Station 5 (East-West Line)",  name_ar: "محطة الضخ ٥ - الخط الشرقي الغربي", city: Buraydah,   region: SA-05, lat: 26.0000, lon: 44.5000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+
+  # --- SA-07 Tabuk (9) -----------------------------------------------------
+  - {id: TB-OFF-TBK, name_en: "Tabuk Regional Office",            name_ar: "المكتب الإقليمي بتبوك",         city: Tabuk,         region: SA-07, lat: 28.3835, lon: 36.5662, class: office,        hardship_tier: 1, headcount_weight: 16}
+  - {id: TB-DEP-TBK, name_en: "Tabuk Distribution Depot",         name_ar: "مستودع التوزيع بتبوك",          city: Tabuk,         region: SA-07, lat: 28.3500, lon: 36.5300, class: depot,         hardship_tier: 1, headcount_weight: 11}
+  - {id: TB-TRM-DBA, name_en: "Duba Marine Terminal",             name_ar: "الميناء البحري بضباء",          city: Duba,          region: SA-07, lat: 27.3500, lon: 35.6900, class: terminal,      hardship_tier: 2, headcount_weight: 14, remote_allowance_eligible: true}
+  - {id: TB-DEP-DBA, name_en: "Duba Depot",                       name_ar: "مستودع ضباء",                   city: Duba,          region: SA-07, lat: 27.3400, lon: 35.7000, class: depot,         hardship_tier: 2, headcount_weight: 8, remote_allowance_eligible: true}
+  - {id: TB-CMP-NEM, name_en: "NEOM Support Camp",                name_ar: "مخيم الدعم بنيوم",              city: Sharma,        region: SA-07, lat: 28.0000, lon: 35.3000, class: drilling_camp, hardship_tier: 3, headcount_weight: 14}
+  - {id: TB-OFF-NEM, name_en: "NEOM Liaison Office",              name_ar: "مكتب الاتصال بنيوم",            city: Sharma,        region: SA-07, lat: 27.9500, lon: 35.3500, class: office,        hardship_tier: 2, headcount_weight: 9, remote_allowance_eligible: true}
+  - {id: TB-DEP-HQL, name_en: "Haql Depot",                       name_ar: "مستودع حقل",                    city: Haql,          region: SA-07, lat: 29.2800, lon: 34.9400, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: TB-CMP-TYM, name_en: "Tayma Exploration Camp",           name_ar: "مخيم الاستكشاف بتيماء",         city: Tayma,         region: SA-07, lat: 27.6300, lon: 38.5500, class: drilling_camp, hardship_tier: 3, headcount_weight: 8}
+  - {id: TB-OFF-UMJ, name_en: "Umluj Area Office",                name_ar: "مكتب منطقة أملج",               city: Umluj,         region: SA-07, lat: 25.0200, lon: 37.2670, class: office,        hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+
+  # --- SA-12 Al Jawf (8) ---------------------------------------------------
+  - {id: JF-OFF-SKK, name_en: "Sakaka Regional Office",           name_ar: "المكتب الإقليمي بسكاكا",        city: Sakaka,        region: SA-12, lat: 29.9700, lon: 40.2060, class: office,        hardship_tier: 1, headcount_weight: 14}
+  - {id: JF-DEP-SKK, name_en: "Sakaka Depot",                     name_ar: "مستودع سكاكا",                  city: Sakaka,        region: SA-12, lat: 29.9400, lon: 40.1800, class: depot,         hardship_tier: 1, headcount_weight: 9}
+  - {id: JF-TRN-SKK, name_en: "Sakaka Training Centre",           name_ar: "مركز التدريب بسكاكا",           city: Sakaka,        region: SA-12, lat: 29.9750, lon: 40.2100, class: training,      hardship_tier: 1, headcount_weight: 6}
+  - {id: JF-OFF-QRT, name_en: "Qurayyat Area Office",             name_ar: "مكتب منطقة القريات",            city: Al Qurayyat,   region: SA-12, lat: 31.3320, lon: 37.3420, class: office,        hardship_tier: 2, headcount_weight: 9, remote_allowance_eligible: true}
+  - {id: JF-DEP-QRT, name_en: "Qurayyat Border Depot",            name_ar: "مستودع القريات الحدودي",        city: Al Qurayyat,   region: SA-12, lat: 31.3400, lon: 37.3600, class: depot,         hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: JF-PMP-N01, name_en: "Qurayyat Pump Station",            name_ar: "محطة ضخ القريات",               city: Al Qurayyat,   region: SA-12, lat: 31.2000, lon: 37.5000, class: pump_station,  hardship_tier: 2, headcount_weight: 5}
+  - {id: JF-DEP-TBJ, name_en: "Tabarjal Depot",                   name_ar: "مستودع طبرجل",                  city: Tabarjal,      region: SA-12, lat: 30.4980, lon: 38.2200, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: JF-CMP-JWF, name_en: "Jawf Exploration Camp",            name_ar: "مخيم الاستكشاف بالجوف",         city: Dumat al-Jandal, region: SA-12, lat: 29.8100, lon: 39.8700, class: drilling_camp, hardship_tier: 3, headcount_weight: 10}
+
+  # --- SA-08 Northern Borders (8) ------------------------------------------
+  - {id: NB-OFF-ARR, name_en: "Arar Regional Office",             name_ar: "المكتب الإقليمي بعرعر",         city: Arar,          region: SA-08, lat: 30.9750, lon: 41.0380, class: office,        hardship_tier: 2, headcount_weight: 13, remote_allowance_eligible: true}
+  - {id: NB-DEP-ARR, name_en: "Arar Depot",                       name_ar: "مستودع عرعر",                   city: Arar,          region: SA-08, lat: 30.9500, lon: 41.0000, class: depot,         hardship_tier: 2, headcount_weight: 9, remote_allowance_eligible: true}
+  - {id: NB-MED-ARR, name_en: "Arar Clinic",                      name_ar: "عيادة عرعر",                    city: Arar,          region: SA-08, lat: 30.9800, lon: 41.0400, class: medical,       hardship_tier: 2, headcount_weight: 5}
+  - {id: NB-OFF-TRF, name_en: "Turaif Area Office",               name_ar: "مكتب منطقة طريف",               city: Turaif,        region: SA-08, lat: 31.6900, lon: 38.6700, class: office,        hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: NB-PMP-N01, name_en: "Turaif Pump Station",              name_ar: "محطة ضخ طريف",                  city: Turaif,        region: SA-08, lat: 31.6800, lon: 38.6600, class: pump_station,  hardship_tier: 3, headcount_weight: 7}
+  - {id: NB-CMP-RFH, name_en: "Rafha Field Camp",                 name_ar: "مخيم رفحاء الميداني",           city: Rafha,         region: SA-08, lat: 29.6200, lon: 43.4900, class: drilling_camp, hardship_tier: 3, headcount_weight: 10}
+  - {id: NB-DEP-RFH, name_en: "Rafha Depot",                      name_ar: "مستودع رفحاء",                  city: Rafha,         region: SA-08, lat: 29.6400, lon: 43.5100, class: depot,         hardship_tier: 2, headcount_weight: 7, remote_allowance_eligible: true}
+  - {id: NB-PMP-N02, name_en: "Rafha Pump Station",               name_ar: "محطة ضخ رفحاء",                 city: Rafha,         region: SA-08, lat: 29.5000, lon: 43.2000, class: pump_station,  hardship_tier: 3, headcount_weight: 6}
+
+  # --- SA-06 Hail (7) ------------------------------------------------------
+  - {id: HL-OFF-HAL, name_en: "Hail Regional Office",             name_ar: "المكتب الإقليمي بحائل",         city: Hail,          region: SA-06, lat: 27.5220, lon: 41.6900, class: office,        hardship_tier: 1, headcount_weight: 14}
+  - {id: HL-DEP-HAL, name_en: "Hail Distribution Depot",          name_ar: "مستودع التوزيع بحائل",          city: Hail,          region: SA-06, lat: 27.4900, lon: 41.6600, class: depot,         hardship_tier: 1, headcount_weight: 10}
+  - {id: HL-TRN-HAL, name_en: "Hail Training Centre",             name_ar: "مركز التدريب بحائل",            city: Hail,          region: SA-06, lat: 27.5250, lon: 41.6950, class: training,      hardship_tier: 1, headcount_weight: 6}
+  - {id: HL-CMP-HAL, name_en: "Hail Exploration Camp",            name_ar: "مخيم الاستكشاف بحائل",          city: Hail,          region: SA-06, lat: 27.7000, lon: 41.4000, class: drilling_camp, hardship_tier: 2, headcount_weight: 9}
+  - {id: HL-DEP-BQA, name_en: "Baqaa Depot",                      name_ar: "مستودع بقعاء",                  city: Baqaa,         region: SA-06, lat: 27.8800, lon: 42.0300, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: HL-OFF-SMR, name_en: "Samira Area Office",               name_ar: "مكتب منطقة سميراء",             city: Samira,        region: SA-06, lat: 27.2200, lon: 42.6300, class: office,        hardship_tier: 2, headcount_weight: 5, remote_allowance_eligible: true}
+  - {id: HL-PMP-P04, name_en: "Pump Station 4 (East-West Line)",  name_ar: "محطة الضخ ٤ - الخط الشرقي الغربي", city: Hail,       region: SA-06, lat: 27.0000, lon: 42.5000, class: pump_station,  hardship_tier: 2, headcount_weight: 6}
+
+  # --- SA-10 Najran (6) ----------------------------------------------------
+  - {id: NJ-OFF-NJR, name_en: "Najran Regional Office",           name_ar: "المكتب الإقليمي بنجران",        city: Najran,        region: SA-10, lat: 17.4917, lon: 44.1322, class: office,        hardship_tier: 2, headcount_weight: 12, remote_allowance_eligible: true}
+  - {id: NJ-DEP-NJR, name_en: "Najran Depot",                     name_ar: "مستودع نجران",                  city: Najran,        region: SA-10, lat: 17.5100, lon: 44.1000, class: depot,         hardship_tier: 2, headcount_weight: 9, remote_allowance_eligible: true}
+  - {id: NJ-CMP-NJR, name_en: "Najran Exploration Camp",          name_ar: "مخيم الاستكشاف بنجران",         city: Najran,        region: SA-10, lat: 17.7000, lon: 44.5000, class: drilling_camp, hardship_tier: 3, headcount_weight: 10}
+  - {id: NJ-DEP-SHR, name_en: "Sharurah Depot",                   name_ar: "مستودع شرورة",                  city: Sharurah,      region: SA-10, lat: 17.4830, lon: 47.1200, class: depot,         hardship_tier: 3, headcount_weight: 8, remote_allowance_eligible: true}
+  - {id: NJ-CMP-SHR, name_en: "Sharurah Field Camp",              name_ar: "مخيم شرورة الميداني",           city: Sharurah,      region: SA-10, lat: 17.4500, lon: 47.0800, class: drilling_camp, hardship_tier: 3, headcount_weight: 11}
+  - {id: NJ-OFF-SHR, name_en: "Sharurah Area Office",             name_ar: "مكتب منطقة شرورة",              city: Sharurah,      region: SA-10, lat: 17.4860, lon: 47.1250, class: office,        hardship_tier: 3, headcount_weight: 6, remote_allowance_eligible: true}
+
+  # --- SA-11 Al Bahah (5) --------------------------------------------------
+  - {id: BH-OFF-BAH, name_en: "Al Bahah Regional Office",         name_ar: "المكتب الإقليمي بالباحة",       city: Al Bahah,      region: SA-11, lat: 20.0129, lon: 41.4677, class: office,        hardship_tier: 1, headcount_weight: 10}
+  - {id: BH-DEP-BAH, name_en: "Al Bahah Depot",                   name_ar: "مستودع الباحة",                 city: Al Bahah,      region: SA-11, lat: 19.9900, lon: 41.4400, class: depot,         hardship_tier: 1, headcount_weight: 8}
+  - {id: BH-DEP-BLJ, name_en: "Baljurashi Depot",                 name_ar: "مستودع بلجرشي",                 city: Baljurashi,    region: SA-11, lat: 19.8600, lon: 41.5700, class: depot,         hardship_tier: 2, headcount_weight: 6, remote_allowance_eligible: true}
+  - {id: BH-OFF-QLW, name_en: "Qilwah Area Office",               name_ar: "مكتب منطقة قلوة",               city: Qilwah,        region: SA-11, lat: 19.8500, lon: 41.6800, class: office,        hardship_tier: 2, headcount_weight: 5, remote_allowance_eligible: true}
+  - {id: BH-DEP-MKH, name_en: "Al Makhwah Depot",                 name_ar: "مستودع المخواة",                city: Al Makhwah,    region: SA-11, lat: 19.7700, lon: 41.3000, class: depot,         hardship_tier: 2, headcount_weight: 5, remote_allowance_eligible: true}

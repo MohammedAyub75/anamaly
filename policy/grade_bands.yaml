@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# policy/grade_bands.yaml — salary bands and grade-level entitlements
+#
+# Grades 1-20. All amounts are MONTHLY SAR (never annual — see CLAUDE.md).
+#
+# Per-nationality-class bands
+#   The plan calls for salary_min/mid/max per nationality class. Rather than
+#   repeat 60 hand-maintained rows, the base band is stated once per grade and
+#   each class carries a multiplier. datagen materialises the full 20 x 3 table
+#   into dim_grade at build time, and the Policy Explorer screen renders the
+#   resolved table — reviewers never see the multiplier form.
+#
+#       band(grade, class).min = round(base[grade].min * multiplier[class])
+#
+#   The expat premium applies only from the grade named in `applies_from`;
+#   below it every class shares the national band. This matters: anomaly A09
+#   (nationality-restricted benefit paid to an ineligible class) is only a
+#   real finding because the classes genuinely differ.
+#
+# Contract: docs/DATA_DICTIONARY.md -> dim_grade
+# ---------------------------------------------------------------------------
+version: 1
+currency: SAR
+pay_period: monthly
+
+nationality_classes:
+  saudi: {multiplier: 1.00, applies_from: 1,  gosi_class: saudi_full,  notes: "Full GOSI: pension + hazards + unemployment (SANED)."}
+  gcc:   {multiplier: 1.00, applies_from: 1,  gosi_class: gcc_bilateral, notes: "Insured in home GCC state under the bilateral protection extension."}
+  expat: {multiplier: 1.06, applies_from: 8,  gosi_class: expat_hazards, notes: "Occupational-hazards branch only. Premium applies from grade 8 up."}
+
+# Steps within a grade. A step is a horizontal move; a grade change is vertical.
+steps:
+  count: 12
+  increment_pct: 2.4            # each step adds 2.4% of band minimum
+  annual_eligibility_months: 12 # minimum months between increments (see B07)
+
+bands:
+  #  grade:  {min,    mid,    max}
+  1:  {min: 4500,  mid: 5200,   max: 6000}
+  2:  {min: 5200,  mid: 6100,   max: 7100}
+  3:  {min: 6000,  mid: 7100,   max: 8300}
+  4:  {min: 7000,  mid: 8300,   max: 9700}
+  5:  {min: 8200,  mid: 9700,   max: 11400}
+  6:  {min: 9600,  mid: 11400,  max: 13400}
+  7:  {min: 11200, mid: 13300,  max: 15700}
+  8:  {min: 13100, mid: 15600,  max: 18400}
+  9:  {min: 15300, mid: 18300,  max: 21600}
+  10: {min: 17900, mid: 21400,  max: 25300}
+  11: {min: 21000, mid: 25100,  max: 29700}
+  12: {min: 24600, mid: 29500,  max: 34900}
+  13: {min: 28800, mid: 34600,  max: 41000}
+  14: {min: 33800, mid: 40600,  max: 48200}
+  15: {min: 39600, mid: 47700,  max: 56700}
+  16: {min: 46400, mid: 56000,  max: 66600}
+  17: {min: 54400, mid: 65700,  max: 78300}
+  18: {min: 63800, mid: 77200,  max: 92000}
+  19: {min: 74800, mid: 90600,  max: 108000}
+  20: {min: 87700, mid: 106400, max: 127000}
+
+# Shape of the population. datagen samples grades against these weights, giving
+# the pyramid a realistic top-heavy taper rather than a uniform spread.
+grade_distribution_weights:
+  1: 20, 2: 46, 3: 78, 4: 112, 5: 138, 6: 150, 7: 146, 8: 132, 9: 112, 10: 92
+  11: 72, 12: 55, 13: 40, 14: 28, 15: 19, 16: 12, 17: 7, 18: 4, 19: 2, 20: 1
+
+# Which allowance codes a grade may hold at all. Site- and person-level
+# eligibility is layered on top of this in policy/allowance_rules.yaml — this
+# table is the grade gate only, and is what rule A07 checks against.
+grade_entitlements:
+  1-4:   [HOUSING, TRANSPORT, REMOTE_SITE, HARDSHIP, OFFSHORE, ROTATION, SHIFT, ON_CALL, SAFETY, MEAL, UNIFORM, FIELD_MESSING, TRAVEL_TIME, MOBILE]
+  5-8:   [HOUSING, TRANSPORT, REMOTE_SITE, HARDSHIP, OFFSHORE, ROTATION, SHIFT, ON_CALL, SAFETY, MEAL, UNIFORM, FIELD_MESSING, TRAVEL_TIME, MOBILE, FAMILY, SCHOOL_ASSIST, CERT_PREMIUM, ACTING_ROLE, RELOCATION, LANGUAGE]
+  9-13:  [HOUSING, TRANSPORT, REMOTE_SITE, HARDSHIP, OFFSHORE, ROTATION, SHIFT, ON_CALL, SAFETY, MEAL, TRAVEL_TIME, MOBILE, FAMILY, SCHOOL_ASSIST, CERT_PREMIUM, ACTING_ROLE, RELOCATION, LANGUAGE, EXPAT_PREMIUM, FUEL, SECURITY_CLEARANCE]
+  14-17: [HOUSING, TRANSPORT, REMOTE_SITE, HARDSHIP, OFFSHORE, ROTATION, SAFETY, MOBILE, FAMILY, SCHOOL_ASSIST, CERT_PREMIUM, ACTING_ROLE, RELOCATION, LANGUAGE, EXPAT_PREMIUM, FUEL, CAR, SECURITY_CLEARANCE]
+  18-20: [HOUSING, TRANSPORT, REMOTE_SITE, HARDSHIP, OFFSHORE, MOBILE, FAMILY, SCHOOL_ASSIST, ACTING_ROLE, RELOCATION, EXPAT_PREMIUM, FUEL, CAR, SECURITY_CLEARANCE]
+
+# Thresholds the detector's statistical layer reads rather than hard-coding.
+band_policy:
+  underpayment_tolerance_pct: 2.0   # below min by more than this -> B02
+  overpayment_tolerance_pct: 2.0    # above max by more than this -> B01 candidate
+  max_increments_per_12m: 1         # more than this -> B07
+  max_grade_jump_per_24m: 2         # more than this -> D01
+  promotion_min_months_in_grade: 18
