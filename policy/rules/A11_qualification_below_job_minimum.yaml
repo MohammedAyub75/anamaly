@@ -1,0 +1,49 @@
+id: A11
+family: A
+name_en: Qualification or certification below the job's mandatory minimum
+name_ar: "المؤهل أو الشهادة أقل من الحد الأدنى للوظيفة"
+severity: CRITICAL
+regulatory_reference: "HR-ORG-004 Job Classification s.3; HR-CMP-004 Professional Certification s.3"
+enabled: true
+
+# A safety finding first and a pay finding second. Severity follows the post:
+# an expired certification in a safety-critical role is a different order of
+# problem from an education shortfall in an administrative one.
+severity_expr: "CASE WHEN job_safety_critical THEN 'CRITICAL' ELSE 'MEDIUM' END"
+
+sql_predicate: |
+  education_below_job_minimum
+  OR required_certification_missing
+  OR certification_expired
+
+evidence_fields:
+  - employee_id
+  - asat_job_code
+  - job_title_en
+  - job_safety_critical
+  - job_min_education
+  - education_level
+  - certifications_count
+  - job_required_certification_count
+  - has_valid_required_certifications
+  - work_site_id
+  - site_name_en
+
+description_template: >
+  Since {first_period_label} the employee has held {asat_job_code}
+  ({job_title_en}), which requires {job_min_education} education and
+  {job_required_certification_count} certification(s); the record shows
+  {education_level} education and {certifications_count} certification(s) held.
+
+# No money moves on this finding on its own -- the employee is paid for the
+# grade they hold. What is at stake is the duty they are performing.
+financial_impact:
+  monthly_expr: "0"
+  cumulative_expr: "0"
+
+recommended_actions:
+  - "Suspend the employee from safety-critical duty pending verification"
+  - "Schedule recertification or confirm the qualification record is incomplete"
+  - "Review how the appointment to {asat_job_code} was approved"
+
+exclusions: []

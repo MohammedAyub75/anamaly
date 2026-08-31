@@ -1,0 +1,36 @@
+id: A06
+family: A
+name_en: Transport or fuel allowance paid while on a company bus route
+name_ar: "بدل نقل أو وقود مع وجود نقل الشركة"
+severity: MEDIUM
+regulatory_reference: "HR-COMP-004 Transport Policy s.2; HR-COMP-022 Fuel Support s.1"
+enabled: true
+
+sql_predicate: |
+  (allowance_TRANSPORT_amount > 0 OR allowance_FUEL_amount > 0)
+  AND transport_mode = 'company_bus'
+
+evidence_fields:
+  - employee_id
+  - transport_mode
+  - company_bus_route_id
+  - work_site_id
+  - site_name_en
+  - allowance_TRANSPORT_amount
+  - allowance_FUEL_amount
+
+description_template: >
+  Transport allowance of SAR {allowance_TRANSPORT_amount:,.0f} and fuel allowance of
+  SAR {allowance_FUEL_amount:,.0f} per month have been paid since {first_period_label}
+  while the employee is assigned to company bus route {company_bus_route_id}.
+
+financial_impact:
+  monthly_expr: allowance_TRANSPORT_amount + allowance_FUEL_amount
+  cumulative_expr: (allowance_TRANSPORT_amount + allowance_FUEL_amount) * months_paid
+
+recommended_actions:
+  - "Suspend the transport and fuel allowances pending review"
+  - "Confirm bus route {company_bus_route_id} assignment with Site Transport"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+exclusions: []

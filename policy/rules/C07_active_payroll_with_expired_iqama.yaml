@@ -1,0 +1,39 @@
+id: C07
+family: C
+name_en: Active employee paid while their residency permit has expired
+name_ar: "صرف رواتب مع انتهاء صلاحية الإقامة"
+severity: CRITICAL
+regulatory_reference: "Saudi Labour Law art.33; HR-GOV-002 Work Permit Compliance"
+enabled: true
+
+sql_predicate: |
+  iqama_expiry IS NOT NULL
+  AND status = 'active'
+  AND paid_flag
+  AND iqama_expiry < period_end_date
+
+evidence_fields:
+  - employee_id
+  - status
+  - nationality
+  - nationality_class
+  - iqama_expiry
+  - net
+  - work_site_id
+  - site_name_en
+
+description_template: >
+  The employee's residency permit expired on {iqama_expiry} and they have remained
+  on active payroll since {first_period_label}, {months_paid} month(s) at SAR
+  {net:,.0f} net.
+
+financial_impact:
+  monthly_expr: net
+  cumulative_expr: net * months_paid
+
+recommended_actions:
+  - "Escalate to Government Relations today -- this is a regulatory exposure"
+  - "Suspend pay until the permit is renewed"
+  - "Renew the permit or begin offboarding, whichever the review supports"
+
+exclusions: []

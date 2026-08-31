@@ -1,0 +1,53 @@
+id: A12
+family: A
+name_en: Time-limited allowance still running past its permitted duration
+name_ar: "بدل محدد المدة مستمر بعد الحد الأقصى"
+severity: MEDIUM
+regulatory_reference: "HR-ORG-018 Acting Assignments s.5; HR-MOB-007 Relocation Support s.3"
+enabled: true
+
+# Acting-role and relocation allowances are both bridging payments with a
+# maximum duration in policy/allowance_rules.yaml. The feature build resolves
+# each one's overrun against that maximum, so the limit lives in the allowance
+# schedule and not in this file.
+sql_predicate: |
+  (allowance_ACTING_ROLE_amount > 0
+   AND (acting_role_since IS NULL OR acting_months_over_limit > 0))
+  OR (allowance_RELOCATION_amount > 0 AND relocation_months_over_limit > 0)
+
+evidence_fields:
+  - employee_id
+  - acting_role_flag
+  - acting_role_since
+  - acting_months
+  - acting_months_over_limit
+  - months_since_site_change
+  - relocation_months_over_limit
+  - allowance_ACTING_ROLE_amount
+  - allowance_RELOCATION_amount
+
+description_template: >
+  The acting-role allowance of SAR {allowance_ACTING_ROLE_amount:,.0f} per month has
+  been running since {acting_role_since} -- {acting_months} months, which is
+  {acting_months_over_limit} months beyond the permitted maximum -- and relocation
+  allowance of SAR {allowance_RELOCATION_amount:,.0f} per month is
+  {relocation_months_over_limit} months beyond its own limit.
+
+financial_impact:
+  monthly_expr: >
+    CASE WHEN acting_role_since IS NULL OR acting_months_over_limit > 0
+         THEN allowance_ACTING_ROLE_amount ELSE 0 END
+    + CASE WHEN relocation_months_over_limit > 0
+           THEN allowance_RELOCATION_amount ELSE 0 END
+  cumulative_expr: >
+    (CASE WHEN acting_role_since IS NULL OR acting_months_over_limit > 0
+          THEN allowance_ACTING_ROLE_amount ELSE 0 END
+     + CASE WHEN relocation_months_over_limit > 0
+            THEN allowance_RELOCATION_amount ELSE 0 END) * months_paid
+
+recommended_actions:
+  - "Confirm with the line organisation whether the acting assignment is still in force"
+  - "Regularise the position or stop the allowance"
+  - "Raise a recovery case for the months paid beyond the permitted maximum"
+
+exclusions: []

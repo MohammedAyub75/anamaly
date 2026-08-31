@@ -103,7 +103,7 @@ Materialised from `policy/allowance_rules.yaml`.
 | `name_en` / `name_ar` | VARCHAR | not null | Reviewer-facing label. |
 | `amount_basis` | ENUM | `fixed`, `pct_of_base`, `grade_table`, `site_table` | How the amount is computed. |
 | `amount` / `rate_pct` / `cap` | DECIMAL(12,2) / DOUBLE | nullable | Populated per basis. |
-| `eligibility_rule_id` | VARCHAR(10) | nullable | Rule in `policy/rules/` that polices it. |
+| `eligibility_rule_id` | VARCHAR(10) | nullable | The rule in `policy/rules/` that polices it, resolved by looking for a `<code>_*.yaml` matching one of `violation_codes`. It fills in as rule files land — null before phase 3 for everything but `REMOTE_SITE` — so **`policy/rules/` is a generation input that `policy_digest` does not cover**. Adding a rule changes this column without invalidating the lake; regenerate after a phase that adds rules. The digest deliberately stays out of it: editing a rule's wording must not force a 24M-row regeneration, and the eval report carries its own `rule_digest` instead. |
 | `violation_codes` | LIST\<VARCHAR\> | | Anomaly codes this allowance can produce. |
 | `regulatory_reference` | VARCHAR | not null | Cited verbatim in the evidence bundle. |
 | `one_off` | BOOLEAN | default false | `SEVERANCE` only. |

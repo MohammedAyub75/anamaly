@@ -1,0 +1,42 @@
+id: A04
+family: A
+name_en: Family or school assistance paid with no qualifying dependents
+name_ar: "بدل عائلي أو مساعدة تعليم بدون معالين مؤهلين"
+severity: MEDIUM
+regulatory_reference: "HR-BEN-030 Family Support s.2; HR-BEN-031 Education Assistance s.1"
+enabled: true
+
+# Both allowances rest on the same declaration: dependents, resident in the
+# Kingdom. Either count at zero removes the basis for both.
+sql_predicate: |
+  (allowance_FAMILY_amount > 0 OR allowance_SCHOOL_ASSIST_amount > 0)
+  AND (dependents_count = 0 OR dependents_in_kingdom = 0)
+
+evidence_fields:
+  - employee_id
+  - marital_status
+  - dependents_count
+  - dependents_in_kingdom
+  - spouse_employed_internally
+  - allowance_FAMILY_amount
+  - allowance_SCHOOL_ASSIST_amount
+
+description_template: >
+  Family support of SAR {allowance_FAMILY_amount:,.0f} and education assistance of
+  SAR {allowance_SCHOOL_ASSIST_amount:,.0f} per month have been paid since
+  {first_period_label}, but the employee's record shows {dependents_count} dependents,
+  of whom {dependents_in_kingdom} are resident in the Kingdom.
+
+financial_impact:
+  monthly_expr: allowance_FAMILY_amount + allowance_SCHOOL_ASSIST_amount
+  cumulative_expr: (allowance_FAMILY_amount + allowance_SCHOOL_ASSIST_amount) * months_paid
+
+recommended_actions:
+  - "Request an updated dependent declaration from the employee"
+  - "Suspend both allowances pending proof of qualifying dependents"
+  - "Raise a recovery case for the {months_paid} months if the declaration is not produced"
+
+# No exclusion. The legitimate look-alike here would be a dependent declaration
+# updated after the fact, and the record carries no effective date for it to be
+# judged against -- so this is a gap in the data rather than a case to exclude.
+exclusions: []

@@ -1,0 +1,43 @@
+id: A08
+family: A
+name_en: Grade held is outside the band the job code permits
+name_ar: "الدرجة خارج النطاق المسموح للوظيفة"
+severity: HIGH
+regulatory_reference: "HR-ORG-004 Job Classification s.2"
+enabled: true
+
+# Compared against the assignment as it stood in each month, not against the
+# current record: a mismatch that has since been corrected still happened.
+sql_predicate: |
+  asat_grade < job_min_grade OR asat_grade > job_max_grade
+
+evidence_fields:
+  - employee_id
+  - asat_grade
+  - asat_job_code
+  - job_title_en
+  - job_family
+  - job_min_grade
+  - job_max_grade
+  - asat_base_salary
+  - band_salary_min
+  - band_salary_max
+
+description_template: >
+  The employee has held grade {asat_grade} since {first_period_label} in job
+  {asat_job_code} ({job_title_en}), which is approved only for grades
+  {job_min_grade} to {job_max_grade}.
+
+# A classification mismatch, not a payment: the salary is inside the band for the
+# grade actually held, so there is no overpayment to recover until Compensation
+# decides which of the two is wrong.
+financial_impact:
+  monthly_expr: "0"
+  cumulative_expr: "0"
+
+recommended_actions:
+  - "Confirm the correct grade and job code with Compensation"
+  - "Regrade the employee or reassign the job code, whichever the review supports"
+  - "Review how the mismatch passed the position control check"
+
+exclusions: []

@@ -1,0 +1,41 @@
+id: C08
+family: C
+name_en: Payroll charged to a cost centre the employee does not belong to
+name_ar: "تحميل الرواتب على مركز تكلفة غير تابع للموظف"
+severity: HIGH
+regulatory_reference: "FIN-CTL-006 Cost Centre Authorisation s.2"
+enabled: true
+
+# Compared against the org unit the employee belonged to in that month, read
+# from the assignment history rather than from their current unit: a transfer
+# moves the charge legitimately, and comparing to today's unit would flag it.
+sql_predicate: |
+  paid_cost_center IS NOT NULL
+  AND asat_org_cost_center IS NOT NULL
+  AND paid_cost_center <> asat_org_cost_center
+
+evidence_fields:
+  - employee_id
+  - paid_cost_center
+  - asat_org_cost_center
+  - asat_org_unit_id
+  - org_unit_name_en
+  - business_line
+  - gross
+  - payroll_run_id
+
+description_template: >
+  Since {first_period_label} the employee's pay of SAR {gross:,.0f} per month has
+  been charged to cost centre {paid_cost_center}, while they belong to
+  {org_unit_name_en}, whose cost centre is {asat_org_cost_center}.
+
+financial_impact:
+  monthly_expr: gross
+  cumulative_expr: gross * months_paid
+
+recommended_actions:
+  - "Correct the charge to cost centre {asat_org_cost_center}"
+  - "Identify who redirected the charge and on what authority"
+  - "Review the other charges made to {paid_cost_center} in the same period"
+
+exclusions: []

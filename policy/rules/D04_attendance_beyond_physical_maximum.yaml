@@ -1,0 +1,40 @@
+id: D04
+family: D
+name_en: Attendance recorded beyond the days available in the month
+name_ar: "حضور مسجل يتجاوز أيام الشهر"
+severity: MEDIUM
+regulatory_reference: "HR-OPS-030 Attendance Recording s.2"
+enabled: true
+
+sql_predicate: |
+  attendance_days_total > calendar_days
+
+evidence_fields:
+  - employee_id
+  - attendance_days_worked
+  - attendance_days_leave
+  - attendance_absence_days
+  - attendance_days_total
+  - calendar_days
+  - base_pay
+  - asat_manager_id
+
+description_template: >
+  In {last_period_label} the attendance record shows {attendance_days_worked} days
+  worked, {attendance_days_leave} days of leave and {attendance_absence_days} days
+  absent -- {attendance_days_total} days in a month of {calendar_days}.
+
+# The days that cannot have happened, valued at the employee's daily base pay.
+# An estimate rather than a line in the payroll run, because the record does not
+# say which of the three counts is the wrong one.
+financial_impact:
+  monthly_expr: "round(base_pay / calendar_days * (attendance_days_total - calendar_days), 2)"
+  cumulative_expr: "round(base_pay / calendar_days * (attendance_days_total - calendar_days), 2) * months_paid"
+  confidence: estimated
+
+recommended_actions:
+  - "Correct the attendance record for {last_period_label}"
+  - "Check the attendance feed from the source system for this site"
+  - "Confirm the leave and absence days with the approving supervisor"
+
+exclusions: []

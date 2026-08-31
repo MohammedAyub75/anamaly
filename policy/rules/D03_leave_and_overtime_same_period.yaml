@@ -1,0 +1,40 @@
+id: D03
+family: D
+name_en: Overtime claimed in a month largely spent on leave
+name_ar: "مطالبة بعمل إضافي في شهر إجازة"
+severity: MEDIUM
+regulatory_reference: "HR-OPS-031 Timesheet Control s.4"
+enabled: true
+
+# Half a month on leave and a week of overtime in the same month is a timesheet
+# approval failing, not an employee working two shifts.
+sql_predicate: |
+  attendance_days_leave >= 15
+  AND attendance_overtime_hours >= 40
+
+evidence_fields:
+  - employee_id
+  - attendance_days_leave
+  - attendance_days_worked
+  - attendance_overtime_hours
+  - overtime_hours
+  - overtime_pay
+  - calendar_days
+  - asat_manager_id
+
+description_template: >
+  In {last_period_label} the employee was on leave for {attendance_days_leave} of
+  {calendar_days} days and worked {attendance_days_worked} days, yet
+  {attendance_overtime_hours:,.0f} hours of overtime were claimed and SAR
+  {overtime_pay:,.0f} paid.
+
+financial_impact:
+  monthly_expr: overtime_pay
+  cumulative_expr: overtime_pay * months_paid
+
+recommended_actions:
+  - "Verify the timesheet for {last_period_label} with the approving supervisor"
+  - "Recover the overtime paid if the hours cannot be evidenced"
+  - "Review the timesheet approval control in this unit"
+
+exclusions: []

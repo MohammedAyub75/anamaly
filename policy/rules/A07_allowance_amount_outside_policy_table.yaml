@@ -1,0 +1,44 @@
+id: A07
+family: A
+name_en: Allowance paid at an amount the policy schedule does not provide for
+name_ar: "بدل بمبلغ خارج جدول السياسة"
+severity: MEDIUM
+regulatory_reference: "HR-COMP-001 Allowance Schedule s.2"
+enabled: true
+
+# The feature build recomputes every allowance from policy/allowance_rules.yaml
+# and compares against what was paid, to the riyal. Only allowances the employee
+# is entitled to at all are counted: one they have no claim to recomputes to
+# zero, and that is an eligibility breach with its own code (A01-A06, A09, A10).
+# Counting it here as well would put two codes on one row and split its recall.
+sql_predicate: |
+  allowance_offpolicy_count > 0
+
+evidence_fields:
+  - employee_id
+  - allowance_offpolicy_codes
+  - allowance_offpolicy_count
+  - allowance_offpolicy_delta_total
+  - allowance_expected_total
+  - allowance_total
+  - asat_grade
+  - site_hardship_tier
+  - asat_base_salary
+
+description_template: >
+  {allowance_offpolicy_count} allowance(s) -- {allowance_offpolicy_codes} -- have been
+  paid at amounts the schedule does not provide for since {first_period_label}:
+  SAR {allowance_total:,.0f} in total against SAR {allowance_expected_total:,.0f}
+  due at grade {asat_grade}, a difference of SAR
+  {allowance_offpolicy_delta_total:,.0f} per month.
+
+financial_impact:
+  monthly_expr: allowance_offpolicy_delta_total
+  cumulative_expr: allowance_offpolicy_delta_total * months_paid
+
+recommended_actions:
+  - "Correct the affected allowances to the scheduled amount"
+  - "Recover the difference of SAR {allowance_offpolicy_delta_total:,.0f} per month over {months_paid} months"
+  - "Check the payroll master for a manual override on this employee"
+
+exclusions: []

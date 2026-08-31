@@ -12,7 +12,7 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 | 0 | Contract docs, CLAUDE.md, skills, repo scaffold, Compose skeleton, `policy/sites.yaml` (13 regions) | ✅ PASSED | `verify 0` — 24/24 checks | 2026-08-31 | `phase-00` |
 | 1 | `datagen` pass 1 — clean population at 10k, 7 dimensions + 6 facts, 0/34 policy violations | ✅ PASSED | `verify 1` — 54/54 checks | 2026-08-31 | `phase-01` |
 | 2 | `datagen` pass 2 — 34 anomaly codes injected + `labels_anomaly` + 7 confounder types | ✅ PASSED | `verify 2` — 44/44 checks, 34/34 codes at 100% agreement | 2026-08-31 | `phase-02` |
-| 3 | Feature build + Layer 1 rule engine + eval harness | ⬜ not started | `verify 3` | — | — |
+| 3 | Feature build + Layer 1 rule engine + eval harness | ✅ PASSED | `verify 3` — 34/34 checks, 17/17 layer-1 codes at 100% recall and precision | 2026-09-01 | `phase-03` |
 | 4 | Layer 2 peer stats + expected-salary model + SHAP | ⬜ not started | `verify 4` | — | — |
 | 5 | Layer 3 Isolation Forest + autoencoder + graph checks | ⬜ not started | `verify 5` | — | — |
 | 6 | Fusion, severity banding, evidence bundle, financial impact | ⬜ not started | `verify 6` | — | — |
@@ -27,12 +27,13 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 
 ## Next session
 
-Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_02.md`. Implement phase 3 — the
-feature build, the layer-1 rule engine and the eval harness. First command:
+Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_03.md`. Implement phase 4 — layer 2
+peer statistics, the expected-salary model and SHAP. First command:
 
 ```
-python tasks.py verify 2
+python tasks.py verify 3
 ```
 
-(confirms every code is injected and every violation in the lake is accounted for, before building
-something to find them).
+(confirms the feature store, the rule engine and the harness are intact before building the layer
+that reads them). The seven family-B codes sitting at 0% recall in `docs/EVAL_REPORT.md` are the
+work.

@@ -36,7 +36,11 @@ ROOT = Path(__file__).resolve().parent
 # The generator lives in services/datagen and the shared policy core at the
 # repo root; both are importable from here without an install step, which is
 # what lets `python tasks.py` work on a fresh clone.
-SERVICE_PATHS = [ROOT, ROOT / "services" / "datagen"]
+SERVICE_PATHS = [
+    ROOT,
+    ROOT / "services" / "datagen",
+    ROOT / "services" / "detector",
+]
 
 
 def _add_service_paths() -> None:
@@ -598,6 +602,169 @@ def _label_counts(con) -> dict:
     }
 
 
+def verify_3() -> int:
+    """Phase-3 gate: the feature store, the layer-1 rule engine and the harness.
+
+    The objective claim of this phase is narrow and checkable: family A is
+    deterministic, so it must run at 100% recall AND 100% precision, and the
+    feature build must stay inside sixty seconds at 10k.  Everything else here
+    exists to stop that claim being true by accident -- that no rule was
+    silently skipped, that no detector can see `labels_anomaly`, and that a
+    second pass over the same lake produces the same findings.
+    """
+    _add_service_paths()
+    from detector.config import DetectorConfig, LakeError
+    from detector.eval import harness, report
+    from detector.features.build import OUTPUTS, build, feature_columns
+    from detector.lake import LABEL_TABLES, connect
+    from detector.layers.l1_rules import RuleError, RuleSet, run_rules
+    from detector.policy import DetectorPolicy
+    from detector.run import rule_digest
+
+    gate = Gate(3, PHASE_TITLES[3])
+    policy = DetectorPolicy.load(ROOT / "policy")
+
+    def _config():
+        return DetectorConfig.build(
+            "10k", run_id="verify-3",
+            lake=ROOT / "data" / "raw",
+            features=ROOT / "data" / "features",
+            runs=ROOT / "data" / "runs",
+        )
+
+    try:
+        cfg = _config()
+    except LakeError:
+        from datagen.config import ScaleConfig
+        from datagen.pipeline import generate
+        from datagen.policy import DatagenPolicy
+
+        dg = DatagenPolicy.load(ROOT / "policy")
+        print("generating 10k dataset with injection (seed 42) ...")
+        generate(ScaleConfig.build("10k", 42, dg.population,
+                                   out=ROOT / "data" / "raw"), dg)
+        cfg = _config()
+
+    # ---------------------------------------------------------------- rules
+    try:
+        ruleset = RuleSet.load(ROOT / "policy")
+    except RuleError as exc:
+        gate.check("rule pack loads", False, str(exc)[:90])
+        return gate.report()
+
+    family_a = {f"A{n:02d}" for n in range(1, 13)}
+    missing_a = sorted(family_a - set(ruleset.codes))
+    gate.check("family A rules present", not missing_a,
+               f"{len(ruleset.rules)} rules loaded, A01-A12 complete"
+               if not missing_a else f"missing={missing_a}")
+    gate.check("every rule enabled", all(r.enabled for r in ruleset.rules),
+               "a disabled rule is a silent 0% recall row")
+
+    # ------------------------------------------------------------- features
+    built = build(cfg, policy, force=True)
+    gate.check("feature build under 60s", built.seconds < 60,
+               f"{built.seconds:.1f}s for "
+               f"{built.row_counts.get('features_period', 0):,} period rows")
+    gate.check("feature tables written",
+               all(built.row_counts.get(name) for name, _ in OUTPUTS),
+               ", ".join(f"{n}={built.row_counts.get(n, 0):,}" for n, _ in OUTPUTS))
+
+    columns = feature_columns(cfg)
+    leaked = [c for c in columns if "label" in c.lower() or "anomaly" in c.lower()]
+    gate.check("no label leaks into features", not leaked,
+               f"{len(columns)} columns, none derived from ground truth"
+               if not leaked else f"leaked={leaked[:5]}")
+
+    try:
+        ruleset.check_columns(columns)
+        column_error = ""
+    except RuleError as exc:
+        column_error = str(exc)[:90]
+    gate.check("evidence fields exist", not column_error,
+               "every rule's evidence resolves to a feature column"
+               if not column_error else column_error)
+
+    # ------------------------------------------------------------- layer 1
+    con = connect(cfg, features=True)
+    try:
+        blind = 0
+        for table in LABEL_TABLES:
+            try:
+                con.execute(f"SELECT count(*) FROM {table}")
+            except Exception:  # noqa: BLE001 - any binder error is the pass case
+                blind += 1
+        gate.check("detector cannot see labels", blind == len(LABEL_TABLES),
+                   "labels_anomaly and labels_confounder are not in scope")
+        try:
+            ruleset.check_executable(con)
+            bind_error = ""
+        except RuleError as exc:
+            bind_error = str(exc)[:90]
+        gate.check("rules compile to SQL", not bind_error,
+                   f"{len(ruleset.enabled)} predicates bind over the feature store"
+                   if not bind_error else bind_error)
+        l1 = run_rules(con, ruleset)
+        again = run_rules(con, ruleset)
+    finally:
+        con.close()
+
+    gate.check("layer 1 under 60s", l1.seconds < 60,
+               f"{l1.total} findings in {l1.seconds:.2f}s")
+    gate.check("layer 1 is deterministic",
+               again.by_code == l1.by_code
+               and [h["description"] for h in again.hits]
+                   == [h["description"] for h in l1.hits],
+               "a second pass finds the same cases with the same wording")
+
+    # ---------------------------------------------------------------- eval
+    scored = harness.evaluate(
+        cfg, ruleset, l1,
+        runtime={"features": built.seconds, "l1": l1.seconds},
+        policy_digest=policy.digest,
+        rule_digest=rule_digest(ruleset),
+    )
+    path = report.write(scored, ROOT / report.REPORT_PATH)
+
+    for row in scored.implemented:
+        gate.check(
+            f"{row.code} {row.detector.lower()}",
+            row.recall == 1.0 and row.precision == 1.0 and row.window_rate == 1.0,
+            f"{row.injected} injected, {row.detected} found, {row.hits} raised, "
+            f"{_rate(row.precision)} precision, {_rate(row.window_rate)} window",
+        )
+
+    gate.check("family A recall", scored.family_recall("A") == 1.0,
+               f"{_rate(scored.family_recall('A'))} across 12 codes")
+    gate.check("family A precision", scored.family_precision("A") == 1.0,
+               f"{_rate(scored.family_precision('A'))} -- a family-A false "
+               "positive is a bug in the rule, not a tuning opportunity")
+    gate.check("no unaccounted findings", scored.unlabelled_hits == 0,
+               f"{l1.total} findings, every one matched to ground truth"
+               if not scored.unlabelled_hits
+               else f"{scored.unlabelled_hits} unexplained")
+    gate.check("no zero-recall detector", not scored.zero_recall,
+               f"{len(scored.implemented)}/34 codes have a detector, "
+               f"{len(scored.pending)} owned by phases 4-6")
+
+    critical = [c for c in scored.confounders if c.flagged_critical]
+    own_code = [c for c in scored.confounders if c.flagged_by_its_code]
+    gate.check("confounders not flagged", not critical and not own_code,
+               f"{len(scored.confounders)} types, "
+               f"{sum(c.planted for c in scored.confounders)} employees, none flagged"
+               if not critical and not own_code
+               else f"critical={[c.confounder_type for c in critical]}")
+    gate.check("precision@100", scored.precision_at.get(100) == 1.0,
+               _rate(scored.precision_at.get(100)))
+    gate.check("eval report written", path.exists(),
+               f"{report.REPORT_PATH}, 34 code rows")
+
+    return gate.report()
+
+
+def _rate(value: float | None) -> str:
+    return "--" if value is None else f"{value * 100:.0f}%"
+
+
 def verify_pending(phase: int) -> int:
     title = PHASE_TITLES.get(phase, "unknown phase")
     print(f"\nPhase {phase} gate — {title}")
@@ -614,6 +781,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return verify_1()
     if phase == 2:
         return verify_2()
+    if phase == 3:
+        return verify_3()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)
@@ -648,6 +817,34 @@ def cmd_datagen(args: argparse.Namespace) -> int:
     return datagen_main(argv)
 
 
+def cmd_detect(args: argparse.Namespace) -> int:
+    """Thin wrapper over `python -m detector run`, which is the real CLI."""
+    _add_service_paths()
+    from detector.__main__ import main as detector_main
+
+    argv = ["run", "--scale", args.scale]
+    if args.run_id:
+        argv += ["--run-id", args.run_id]
+    if args.stages:
+        argv += ["--stages", args.stages]
+    if args.force:
+        argv.append("--force")
+    return detector_main(argv)
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Thin wrapper over `python -m detector eval`; writes docs/EVAL_REPORT.md."""
+    _add_service_paths()
+    from detector.__main__ import main as detector_main
+
+    argv = ["eval", "--scale", args.scale]
+    if args.run_id:
+        argv += ["--run-id", args.run_id]
+    if args.force:
+        argv.append("--force")
+    return detector_main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python tasks.py",
@@ -673,11 +870,16 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("detect", help="run a detection batch (phase 3)")
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
     p.add_argument("--run-id", default=None)
-    p.set_defaults(func=lambda a: _not_yet("detect", 3))
+    p.add_argument("--stages", default=None,
+                   help="comma-separated subset of features,l1")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_detect)
 
     p = sub.add_parser("eval", help="run the evaluation harness (phase 3)")
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
-    p.set_defaults(func=lambda a: _not_yet("eval", 3))
+    p.add_argument("--run-id", default=None)
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_eval)
 
     p = sub.add_parser("api", help="start the FastAPI backend (phase 8)")
     p.set_defaults(func=lambda a: _not_yet("api", 8))

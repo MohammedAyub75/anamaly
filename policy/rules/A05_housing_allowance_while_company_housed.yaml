@@ -1,0 +1,40 @@
+id: A05
+family: A
+name_en: Housing allowance paid while the employee is in company accommodation
+name_ar: "بدل سكن مع توفر سكن الشركة"
+severity: HIGH
+allowance_code: HOUSING
+regulatory_reference: "HR-COMP-002 Housing Policy s.3"
+enabled: true
+
+# The housing allowance and company accommodation are alternatives, never both.
+# At 25% of base this is usually the largest single entitlement finding.
+sql_predicate: |
+  allowance_HOUSING_amount > 0
+  AND housing_type IN ('company_camp_bachelor', 'company_family_housing')
+
+evidence_fields:
+  - employee_id
+  - housing_type
+  - work_site_id
+  - site_name_en
+  - site_camp_available
+  - site_family_housing_available
+  - allowance_HOUSING_amount
+  - asat_base_salary
+
+description_template: >
+  Housing allowance of SAR {allowance_HOUSING_amount:,.0f} per month has been paid
+  since {first_period_label} while the employee is recorded as living in company
+  accommodation ({housing_type}) at {site_name_en}.
+
+financial_impact:
+  monthly_expr: allowance_HOUSING_amount
+  cumulative_expr: allowance_HOUSING_amount * months_paid
+
+recommended_actions:
+  - "Suspend the housing allowance pending review"
+  - "Confirm the accommodation assignment with Site Services at {site_name_en}"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+exclusions: []

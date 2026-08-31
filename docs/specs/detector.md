@@ -22,8 +22,10 @@ Contracts this service must satisfy: `docs/ANOMALY_CATALOG.md` (what to detect),
 ```
 services/detector/
   detector/
-    __main__.py         # CLI: build-features, run, score, eval
-    config.py
+    __main__.py         # CLI: build-features, run, score, eval, rules
+    config.py           # DetectorConfig: reads the lake's manifest.json
+    lake.py             # DuckDB views; connect() cannot see labels_*
+    policy.py           # PolicyPack -> the SQL forms the feature build needs
     features/
       build.py          # DuckDB SQL -> data/features/
       sql/*.sql         # the feature queries, one file per feature block
@@ -81,6 +83,38 @@ Feature blocks:
 Write as Parquet, partitioned where it helps. Feature names are stable identifiers; the display
 labels the UI shows come from a lookup, never from the column name.
 
+### What phase 3 actually wrote
+
+`data/features/scale=<n>/`, five tables. The grain is the contract; the column list is not, and
+grows as later layers need more.
+
+| Table | Grain | Partition | What it is |
+|---|---|---|---|
+| `features_period` | employee × period | `period` | The wide rule-input table. One row per employee per month from hire onward — not per payroll row, so a finding about a month somebody was *not* paid still has a row to be found on. ~165 columns. |
+| `features_allowance` | employee × period × allowance code | `period` | Long format, with `expected_amount` recomputed from `allowance_rules.yaml` and `off_policy_amount`. The table an A07 alert quotes. |
+| `features_employee` | employee | — | Statics, band position, the 24-month roll-ups and the graph-derived columns. The matrix layer 3 trains on and the grain layer 2 builds cohorts over. State is taken from the employee's **last period in the window**, not from `employee_master`, so statics and period features describe the same month. |
+| `allowance_history` | employee × allowance code | — | Duration, level and largest step per allowance. |
+| `cohort_stats` | ladder level × cohort key × metric | — | Long format: `n`, `median_value`, `mad`, `p01`, `p99` for all five `peer_cohort.fallback_order` levels. Long because the metric set will grow and a new one must not mean a schema migration. |
+
+Two deviations from the block list above, both deliberate:
+
+- **Per-allowance roll-ups carry duration, level and largest step, not mean/std/slope/max-jump.** A
+  monthly entitlement is a flat line by construction; a standard deviation and a trend slope over it
+  are noise. How long it has run, at what level, and the size of the one step that started it are
+  the facts a reviewer asks about. The five *money* series (`base_pay`, `allowance_total`,
+  `overtime_pay`, `net`, `standing_pay`, `allowance_ratio`) do carry all four.
+- **Anything a rule would otherwise have to compute is a column.** The education ordinal, the
+  certification expiry test, the GOSI class a nationality implies, an acting role's overrun against
+  its policy maximum, the off-policy allowance count and its SAR total. A rule predicate is a
+  statement of policy; arithmetic inside one is a feature that was not built.
+
+### Ground truth is out of scope, structurally
+
+`lake.connect()` — the connection every feature build, rule and layer uses — has no view named
+`labels_anomaly`. A query that reaches for one fails with a binder error rather than silently
+scoring 100%. Only `lake.connect_labels()`, which lives behind `detector.eval`, can see them, and
+the phase-3 gate asserts both halves of that.
+
 ## Layer 1 — declarative rules (phase 3)
 
 Rules are `policy/rules/*.yaml` in the shape defined by
@@ -99,6 +133,35 @@ produces a false positive is a bug in the rule, not a tuning opportunity.
 
 Adding a policy = adding a YAML file. No code change. The `add-anomaly-rule` skill enforces the
 full pattern (rule + injector + catalog entry + test).
+
+**Layer 1 owns seventeen codes**, not twelve: `docs/ANOMALY_CATALOG.md` marks A01–A12 plus C04,
+C07, C08, D03 and D04 as `L1`. The phase-3 gate asserts family A at 100/100 because family A is
+what the phase table promises; the other five are gated to the same standard because they are
+equally deterministic.
+
+**Windows, not months.** Consecutive flagged periods are collapsed into one finding per
+(employee, rule) by a gaps-and-islands pass on `period_index`. A rule that fires for fourteen months
+is one case a reviewer works, not fourteen. The engine supplies `first_period_paid`,
+`last_period_paid`, `months_paid` and their `..._label` forms (`March 2024`) to every template, and
+evidence values are read from the last period in the window — the state as it stands now.
+
+**Exclusions are null-safe.** They compile to `AND NOT coalesce((clause), FALSE)`, not
+`AND NOT (clause)`. `NOT (a AND NULL)` is NULL, and a NULL in a `WHERE` drops the row, so an
+unrelated missing field would silently eat a true positive. A row is excluded only when the
+legitimate case is positively established.
+
+**Two optional fields were added to the rule format** in phase 3, both additive:
+
+- `severity_expr` — a SQL expression returning a severity, for codes whose severity depends on the
+  row. A11 is CRITICAL in a safety-critical post and MEDIUM elsewhere, which a single static field
+  cannot express. `severity` remains required and is the fallback.
+- `financial_impact.confidence` — `exact` (default), `estimated` or `unknown`, per
+  `docs/EVIDENCE_CONTRACT.md`. A rule declares `estimated` where the money it names is a
+  reconstruction rather than a line in the payroll run; D04 is the only one that does today.
+
+Output goes to `data/runs/run_id=<id>/l1_hits.parquet` — employee, code, severity, window, rendered
+description, recommended actions, evidence JSON and both financial-impact figures. That file is the
+input phase 6 fuses and scores.
 
 ## Layer 2 — peer statistics (phase 4)
 

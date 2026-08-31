@@ -1,0 +1,40 @@
+id: A03
+family: A
+name_en: Offshore allowance paid for an onshore assignment
+name_ar: "بدل العمل البحري لموقع بري"
+severity: HIGH
+allowance_code: OFFSHORE
+regulatory_reference: "HR-COMP-013 Offshore Operations s.2"
+enabled: true
+
+sql_predicate: |
+  allowance_OFFSHORE_amount > 0
+  AND site_class <> 'offshore'
+
+evidence_fields:
+  - employee_id
+  - work_site_id
+  - site_name_en
+  - site_class
+  - site_offshore_eligible
+  - previous_site_id
+  - previous_site_class
+  - allowance_OFFSHORE_amount
+  - months_since_site_change
+
+description_template: >
+  Offshore allowance of SAR {allowance_OFFSHORE_amount:,.0f} per month has been paid
+  since {first_period_label} while the employee is assigned to {site_name_en}, an
+  onshore {site_class} site.
+
+financial_impact:
+  monthly_expr: allowance_OFFSHORE_amount
+  cumulative_expr: allowance_OFFSHORE_amount * months_paid
+
+recommended_actions:
+  - "Suspend the offshore allowance pending review"
+  - "Confirm the current assignment with Offshore Operations"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+exclusions:
+  - "months_since_site_change <= 1 AND previous_site_class = 'offshore'"

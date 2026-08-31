@@ -1,0 +1,44 @@
+id: A02
+family: A
+name_en: Hardship allowance paid at a site with no hardship classification
+name_ar: "بدل مشقة في موقع غير مصنف"
+severity: HIGH
+allowance_code: HARDSHIP
+regulatory_reference: "HR-COMP-012 Hardship Classification s.4"
+enabled: true
+
+# The hardship table pays nothing at tier 0, so any amount at all at such a site
+# is money the schedule does not provide for.
+sql_predicate: |
+  allowance_HARDSHIP_amount > 0
+  AND site_hardship_tier = 0
+
+evidence_fields:
+  - employee_id
+  - work_site_id
+  - site_name_en
+  - site_class
+  - site_hardship_tier
+  - previous_site_id
+  - previous_site_hardship_tier
+  - allowance_HARDSHIP_amount
+  - months_since_site_change
+
+description_template: >
+  Hardship allowance of SAR {allowance_HARDSHIP_amount:,.0f} per month has been paid
+  since {first_period_label} while the employee is posted to {site_name_en}, which
+  carries no hardship classification and attracts no hardship payment.
+
+financial_impact:
+  monthly_expr: allowance_HARDSHIP_amount
+  cumulative_expr: allowance_HARDSHIP_amount * months_paid
+
+recommended_actions:
+  - "Suspend the hardship allowance pending review"
+  - "Confirm the hardship classification of {site_name_en} with Compensation"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+# A transfer down from a classified site can leave one trailing month in the
+# payroll cycle. That is a posting lag, not a violation.
+exclusions:
+  - "months_since_site_change <= 1 AND previous_site_hardship_tier >= 1"

@@ -127,11 +127,16 @@ is expected at **100% precision and 100% recall** (phase-3 gate).
 - **Actions**: **suspend from safety-critical duty**; schedule recertification; review the appointment.
   This is a safety finding first and a pay finding second.
 
-### A12 — Acting-role allowance beyond the permitted duration
+### A12 — Time-limited allowance beyond its permitted duration
 **Severity** MEDIUM · **Rate** 0.03% · **Detector** L1
+*Two allowances carry a `max_consecutive_months` in `policy/allowance_rules.yaml` and both name A12
+in their `violation_codes`: `ACTING_ROLE` (12 months) and `RELOCATION` (6). The code covers both —
+a bridging payment that never stopped — and the injector plants the acting-role form.*
 - **Injection**: keep `ACTING_ROLE` running 14–30 months past `acting_role_since`
   (policy max: 12).
-- **Detection**: `months_between(acting_role_since, period) > max_consecutive_months`.
+- **Detection**: `months_between(acting_role_since, period) > max_consecutive_months`, and the same
+  test on `RELOCATION` against `months_since_site_change`. The limits come from the allowance
+  schedule, resolved into the feature store, never restated in the rule.
 - **Evidence**: `acting_role_since`, months elapsed, policy maximum, cumulative amount.
 - **Actions**: confirm or end the acting assignment; regularise the position or stop the allowance.
 

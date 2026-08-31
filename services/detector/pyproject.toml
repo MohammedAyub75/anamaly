@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "detector"
+version = "1.0.0"
+description = "Entitlement and payroll anomaly detector: features, layers 1-4, fusion, eval"
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=1.0",
+    "duckdb>=1.1",
+    "pyarrow>=17.0",
+    "numpy>=2.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.scripts]
+detector = "detector.__main__:main"
+
+[tool.setuptools]
+packages = [
+    "detector",
+    "detector.features",
+    "detector.layers",
+    "detector.eval",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

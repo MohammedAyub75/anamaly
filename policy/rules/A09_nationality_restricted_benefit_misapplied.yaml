@@ -1,0 +1,47 @@
+id: A09
+family: A
+name_en: Nationality-restricted benefit or insurance class applied to the wrong employee
+name_ar: "ميزة مقيدة بالجنسية مطبقة على فئة غير مؤهلة"
+severity: HIGH
+regulatory_reference: "HR-COMP-031 International Assignment s.2; HR-NAT-001 Saudization Programme s.2"
+enabled: true
+
+# Two findings that share a cause: a benefit reserved for one nationality class
+# paid to another, and a GOSI registration that does not match the class it is
+# derived from. The second carries a regulatory exposure beyond the money.
+sql_predicate: |
+  (allowance_EXPAT_PREMIUM_amount > 0 AND nationality_class <> 'expat')
+  OR (allowance_SAUDI_DEV_SCHEME_amount > 0 AND nationality_class <> 'saudi')
+  OR gosi_class_mismatch
+
+evidence_fields:
+  - employee_id
+  - nationality
+  - nationality_class
+  - gosi_class
+  - gosi_class_expected
+  - allowance_EXPAT_PREMIUM_amount
+  - allowance_SAUDI_DEV_SCHEME_amount
+
+description_template: >
+  Since {first_period_label} the employee is recorded as {nationality_class} but is
+  registered for GOSI as {gosi_class} where {gosi_class_expected} applies, and is
+  paid SAR {allowance_EXPAT_PREMIUM_amount:,.0f} expatriate premium and
+  SAR {allowance_SAUDI_DEV_SCHEME_amount:,.0f} national development allowance
+  per month.
+
+financial_impact:
+  monthly_expr: >
+    CASE WHEN nationality_class <> 'expat' THEN allowance_EXPAT_PREMIUM_amount ELSE 0 END
+    + CASE WHEN nationality_class <> 'saudi' THEN allowance_SAUDI_DEV_SCHEME_amount ELSE 0 END
+  cumulative_expr: >
+    (CASE WHEN nationality_class <> 'expat' THEN allowance_EXPAT_PREMIUM_amount ELSE 0 END
+     + CASE WHEN nationality_class <> 'saudi' THEN allowance_SAUDI_DEV_SCHEME_amount ELSE 0 END)
+    * months_paid
+
+recommended_actions:
+  - "Suspend the nationality-restricted allowance pending review"
+  - "Correct the GOSI registration to {gosi_class_expected} and notify Government Relations"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+exclusions: []

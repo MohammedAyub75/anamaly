@@ -1,0 +1,39 @@
+id: A10
+family: A
+name_en: Rotation or travel-time allowance paid without a rotation work pattern
+name_ar: "بدل تناوب بدون نمط عمل تناوبي"
+severity: MEDIUM
+regulatory_reference: "HR-OPS-021 Rotational Assignment s.3; HR-OPS-022 Rotational Travel s.2"
+enabled: true
+
+sql_predicate: |
+  (allowance_ROTATION_amount > 0 OR allowance_TRAVEL_TIME_amount > 0)
+  AND work_pattern NOT IN ('rotation_28_28', 'rotation_14_14')
+
+evidence_fields:
+  - employee_id
+  - work_pattern
+  - rotation_cycle_days
+  - attendance_rotation_cycle_id
+  - work_site_id
+  - site_name_en
+  - site_rotation_supported
+  - allowance_ROTATION_amount
+  - allowance_TRAVEL_TIME_amount
+
+description_template: >
+  Rotation allowance of SAR {allowance_ROTATION_amount:,.0f} and travel-time
+  compensation of SAR {allowance_TRAVEL_TIME_amount:,.0f} per month have been paid
+  since {first_period_label}, but the employee works a {work_pattern} pattern and the
+  attendance record shows no rotation cycle.
+
+financial_impact:
+  monthly_expr: allowance_ROTATION_amount + allowance_TRAVEL_TIME_amount
+  cumulative_expr: (allowance_ROTATION_amount + allowance_TRAVEL_TIME_amount) * months_paid
+
+recommended_actions:
+  - "Suspend both allowances pending review"
+  - "Confirm the work pattern with the line supervisor at {site_name_en}"
+  - "Raise a recovery case for the {months_paid} months already paid"
+
+exclusions: []

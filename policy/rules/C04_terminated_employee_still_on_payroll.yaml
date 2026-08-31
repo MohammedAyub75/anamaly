@@ -1,0 +1,44 @@
+id: C04
+family: C
+name_en: Employee still being paid after their termination date
+name_ar: "موظف منتهية خدمته ولا يزال على كشف الرواتب"
+severity: CRITICAL
+regulatory_reference: "Saudi Labour Law art.84; HR-SEP-002 Separation Processing"
+enabled: true
+
+# The end-of-service settlement is a legitimate payment after the termination
+# month, so the test is not "paid after leaving" but "paid something other than
+# the settlement after leaving". The second clause is what carries that: a month
+# holding nothing but SEVERANCE never reaches this rule.
+sql_predicate: |
+  months_since_termination > 0
+  AND paid_flag
+  AND (base_pay > 0 OR non_severance_allowance_count > 0)
+
+evidence_fields:
+  - employee_id
+  - status
+  - termination_date
+  - months_since_termination
+  - base_pay
+  - allowance_total
+  - non_severance_allowance_count
+  - net
+  - asat_org_unit_id
+  - org_unit_name_en
+
+description_template: >
+  The employee left on {termination_date} but payroll has continued: SAR
+  {net:,.0f} net was paid in {last_period_label}, {months_since_termination} months
+  after the termination date, over {months_paid} month(s) in total.
+
+financial_impact:
+  monthly_expr: net
+  cumulative_expr: net * months_paid
+
+recommended_actions:
+  - "Stop payroll for this employee immediately"
+  - "Raise a recovery case for SAR {net:,.0f} per month over {months_paid} months"
+  - "Review the leaver process in {org_unit_name_en}"
+
+exclusions: []
