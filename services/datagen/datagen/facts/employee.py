@@ -83,6 +83,8 @@ class OrgIndex:
     site_of_unit: np.ndarray
     ancestors: list[tuple[int, ...]]
     sections_by_site: dict[int, list[int]]
+    position_of: dict[str, int]
+    siblings: dict[int, tuple[int, ...]]
 
     @classmethod
     def build(cls, table: dict[str, Any], policy: DatagenPolicy) -> OrgIndex:
@@ -107,6 +109,13 @@ class OrgIndex:
         sections_by_site: dict[int, list[int]] = {}
         for position in org_dim.sections(table):
             sections_by_site.setdefault(int(site_of_unit[position]), []).append(int(position))
+        by_parent: dict[str | None, list[int]] = {}
+        for position, parent in enumerate(table["parent_org_unit_id"]):
+            by_parent.setdefault(parent, []).append(position)
+        siblings = {
+            position: tuple(p for p in by_parent[parent] if p != position)
+            for position, parent in enumerate(table["parent_org_unit_id"])
+        }
         return cls(
             ids=ids,
             levels=levels,
@@ -114,6 +123,8 @@ class OrgIndex:
             site_of_unit=site_of_unit,
             ancestors=ancestors,
             sections_by_site=sections_by_site,
+            position_of=position_of,
+            siblings=siblings,
         )
 
     def ancestor_at_level(self, section: int, level: int) -> int:
@@ -181,6 +192,7 @@ class Population:
     approver: np.ndarray
     spouse: np.ndarray
     head_of_unit: dict[int, str]
+    managers: ManagerPool
 
     def __len__(self) -> int:
         return len(self.ids)
@@ -307,7 +319,8 @@ def build_population(
     )
 
     ids = employee_ids(0, count)
-    manager, approver = _assign_managers(ids, grade, org_pos, org)
+    pool = ManagerPool(ids, grade.astype(np.int64), org_pos, org)
+    manager, approver = pool.current(org_pos, grade.astype(np.int64))
     spouse = _pair_spouses(ids, marital, gender, table, pop)
     heads = _unit_heads(ids, grade, org_pos, org)
 
@@ -330,6 +343,7 @@ def build_population(
         approver=approver,
         spouse=spouse,
         head_of_unit=heads,
+        managers=pool,
     )
 
 
@@ -349,49 +363,87 @@ def _level_for(grade: int, level_by_grade: list[tuple[int, int]]) -> int:
     return level_by_grade[-1][1]
 
 
-def _assign_managers(
-    ids: np.ndarray, grade: np.ndarray, org_pos: np.ndarray, org: OrgIndex
-) -> tuple[np.ndarray, np.ndarray]:
-    """Manager: lowest-grade employee at least two grades up, in this unit or above.
+class ManagerPool:
+    """Who could manage whom, resolvable at any point in a career.
 
-    Because a manager's grade is strictly greater than their report's, the graph
-    cannot contain a cycle -- C05 is made impossible rather than checked for.
+    A manager is the lowest-graded employee at least two grades above the
+    report, in the report's own unit or a parent. Two consequences fall out of
+    that rule, and both matter:
+
+    * the graph cannot contain a cycle, because a manager's grade is strictly
+      greater than their report's -- C05 is made impossible rather than checked
+      for afterwards;
+    * the answer changes over a career. A promotion can outgrow the old manager
+      and a transfer moves the employee under a different one, so
+      `fact_assignment_history.manager_id` genuinely varies. Without that, D05
+      ("allowance mix changing abruptly after a manager change") would have
+      nothing to sit against in the clean set and no precision denominator.
     """
-    by_unit: dict[int, list[int]] = {}
-    for index, unit in enumerate(org_pos):
-        by_unit.setdefault(int(unit), []).append(index)
 
-    order = np.lexsort((np.arange(len(ids)), grade))  # by grade, then index
-    sorted_grades = grade[order]
+    def __init__(
+        self, ids: np.ndarray, grade: np.ndarray, org_pos: np.ndarray, org: OrgIndex
+    ) -> None:
+        self.ids = ids
+        self.grade = grade
+        self.org = org
+        members: dict[int, list[int]] = {}
+        for index, unit in enumerate(org_pos):
+            members.setdefault(int(unit), []).append(index)
+        # Per unit, employees sorted by (grade, index) so the nearest eligible
+        # manager is one binary search away.
+        self._unit: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for unit, people in members.items():
+            people_array = np.array(people, dtype=np.int64)
+            order = np.lexsort((people_array, grade[people_array]))
+            ordered = people_array[order]
+            self._unit[unit] = (grade[ordered], ordered)
+        self._order = np.lexsort((np.arange(len(ids)), grade))
+        self._grades = grade[self._order]
 
-    managers = np.empty(len(ids), dtype=object)
-    approvers = np.empty(len(ids), dtype=object)
-    for index in range(len(ids)):
-        needed = grade[index] + 2
-        best: tuple[int, int] | None = None
-        for unit in org.ancestors[int(org_pos[index])]:
-            for candidate in by_unit.get(int(unit), ()):
-                if candidate == index or grade[candidate] < needed:
-                    continue
-                key = (int(grade[candidate]), candidate)
-                if best is None or key < best:
-                    best = key
-            if best is not None:
-                break
-        if best is None:
-            # Nobody senior enough overhead: fall back to the most junior
-            # person in the whole company who still clears the two-grade gap.
-            position = int(np.searchsorted(sorted_grades, needed, "left"))
-            while position < len(order) and int(order[position]) == index:
+    def resolve(self, unit_pos: int, needed_grade: int, exclude: int) -> int | None:
+        """The index of the manager for somebody of this grade in this unit."""
+        for unit in self.org.ancestors[unit_pos]:
+            entry = self._unit.get(int(unit))
+            if entry is None:
+                continue
+            grades, people = entry
+            position = int(np.searchsorted(grades, needed_grade, "left"))
+            while position < len(people) and int(people[position]) == exclude:
                 position += 1
-            best = (0, int(order[position])) if position < len(order) else None
-        managers[index] = ids[best[1]] if best is not None else None
-        # Self-approval is C05, so an employee with no manager is approved by
-        # the most senior person who is not themselves.
-        approvers[index] = managers[index] if best is not None else ids[int(order[-1])]
-        if approvers[index] == ids[index]:
-            approvers[index] = ids[int(order[-2])] if len(order) > 1 else ids[index]
-    return managers, approvers
+            if position < len(people):
+                return int(people[position])
+        # Nobody senior enough overhead: fall back to the most junior person in
+        # the whole company who still clears the two-grade gap.
+        position = int(np.searchsorted(self._grades, needed_grade, "left"))
+        while position < len(self._order) and int(self._order[position]) == exclude:
+            position += 1
+        return int(self._order[position]) if position < len(self._order) else None
+
+    def manager_id(self, unit_pos: int, employee_grade: int, exclude: int) -> str | None:
+        found = self.resolve(unit_pos, employee_grade + 2, exclude)
+        return self.ids[found] if found is not None else None
+
+    def approver_id(self, unit_pos: int, employee_grade: int, exclude: int) -> str:
+        """Who signs the change. Never the employee themselves -- that is C05."""
+        manager = self.manager_id(unit_pos, employee_grade, exclude)
+        if manager is not None:
+            return manager
+        top = int(self._order[-1])
+        if top == exclude and len(self._order) > 1:
+            top = int(self._order[-2])
+        return self.ids[top]
+
+    def current(
+        self, org_pos: np.ndarray, grade: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """`employee_master.manager_id` and a fallback approver for everyone."""
+        managers = np.empty(len(self.ids), dtype=object)
+        approvers = np.empty(len(self.ids), dtype=object)
+        for index in range(len(self.ids)):
+            unit = int(org_pos[index])
+            managers[index] = self.manager_id(unit, int(grade[index]), index)
+            approvers[index] = self.approver_id(unit, int(grade[index]), index)
+        return managers, approvers
 
 
 def _pair_spouses(
@@ -607,6 +659,7 @@ def build_chunk(
             row = job_index.pick_matching(_family, at_grade, _safety, _draw)
             return str(jobs["job_code"][row]), bool(jobs["safety_critical"][row])
 
+        unit_pos = int(population.org_pos[index])
         career = build_career(
             policy=policy,
             cfg=cfg,
@@ -614,10 +667,15 @@ def build_chunk(
             grade=employee_grade,
             nationality_class=nationality_class,
             job_for_grade=job_for_grade,
-            org_unit_id=org.ids[int(population.org_pos[index])],
+            org_unit_id=org.ids[unit_pos],
+            origin_org_unit_id=org.ids[
+                _sibling_unit(org, unit_pos, float(career_draw[offset, 1]))
+            ],
             site_index=int(site_idx[offset]),
+            origin_site_index=_similar_site(
+                policy, int(site_idx[offset]), float(career_draw[offset, 2])
+            ),
             min_grade=site_grade_floor(policy, site),
-            alt_site_index=_similar_site(policy, int(site_idx[offset]), float(career_draw[offset, 2])),
             band_position=float(band_position[offset]),
             draws={
                 "promotions": float(career_draw[offset, 0]),
@@ -625,7 +683,18 @@ def build_chunk(
             },
             terminated_on=population.termination[index],
         )
+        for interval in career.intervals:
+            interval_unit = org.position_of[interval.org_unit_id]
+            interval.manager_id = population.managers.manager_id(
+                interval_unit, interval.grade, index
+            )
+            interval.approved_by = population.managers.approver_id(
+                interval_unit, interval.grade, index
+            )
+
         current = career.current
+        record["org_unit_id"] = current.org_unit_id
+        record["cost_center"] = org.cost_centers[org.position_of[current.org_unit_id]]
         job_row = job_index.by_code[current.job_code]
         safety_critical = bool(jobs["safety_critical"][job_row])
         _apply_job(record, jobs, job_row, policy)
@@ -760,6 +829,19 @@ class _JobIndex:
         if not pool:
             pool = self._all.get((family, grade)) or self._fallback[family]
         return pool[int(draw * len(pool)) % len(pool)]
+
+
+def _sibling_unit(org: OrgIndex, unit_pos: int, draw: float) -> int:
+    """Where the employee was before their last transfer.
+
+    A sibling under the same parent, so the move stays inside the business line
+    and the manager resolution still finds the same ancestor chain. Units with
+    no sibling keep the employee where they are.
+    """
+    peers = org.siblings.get(unit_pos) or ()
+    if not peers:
+        return unit_pos
+    return peers[int(draw * len(peers)) % len(peers)]
 
 
 _SIMILAR_SITES: dict[int, tuple[int, ...]] = {}

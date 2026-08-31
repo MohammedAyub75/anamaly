@@ -428,19 +428,31 @@ def anomaly_predicates(cfg: ScaleConfig, policy: DatagenPolicy) -> dict[str, tup
         ),
         "D05": (
             "allowance step after a manager change",
-            "WITH mgr AS (SELECT employee_id, effective_from, manager_id, "
-            + "lag(manager_id) OVER (PARTITION BY employee_id ORDER BY effective_from) AS prior "
-            + "FROM fact_assignment_history), "
+            # A promotion is excluded: crossing into a new grade band adds
+            # entitlements by policy, and the promotion row explains the step.
+            # What D05 looks for is allowances appearing after a manager change
+            # with nothing in the record that accounts for them.
+            "WITH moves AS (SELECT employee_id, effective_from, manager_id, grade, "
+            + "lag(manager_id) OVER (PARTITION BY employee_id ORDER BY effective_from) "
+            + "AS prior_manager, "
+            + "lag(grade) OVER (PARTITION BY employee_id ORDER BY effective_from) "
+            + "AS prior_grade FROM fact_assignment_history), "
             + "step AS (SELECT employee_id, period, base_pay, allowance_total, "
             + "lag(allowance_total) OVER (PARTITION BY employee_id ORDER BY period) AS prior "
             + "FROM fact_payroll_monthly) "
-            + "SELECT count(*) FROM step s JOIN mgr m ON m.employee_id = s.employee_id "
-            + "AND m.prior IS NOT NULL AND m.manager_id IS DISTINCT FROM m.prior "
+            + "SELECT count(*) FROM step s JOIN moves m ON m.employee_id = s.employee_id "
+            + "AND m.prior_manager IS NOT NULL "
+            + "AND m.manager_id IS DISTINCT FROM m.prior_manager "
+            + "AND m.grade = m.prior_grade "
             + "AND m.effective_from BETWEEN "
             + "make_date(s.period // 100, s.period % 100, 1) - INTERVAL 2 MONTH AND "
             + "last_day(make_date(s.period // 100, s.period % 100, 1)) "
             + "WHERE s.prior IS NOT NULL AND s.base_pay > 0 "
-            + f"AND s.allowance_total - s.prior >= s.base_pay * {D05_ALLOWANCE_STEP}",
+            + f"AND s.allowance_total - s.prior >= s.base_pay * {D05_ALLOWANCE_STEP} "
+            + "AND NOT EXISTS (SELECT 1 FROM moves g WHERE g.employee_id = s.employee_id "
+            + "AND g.grade IS DISTINCT FROM g.prior_grade AND g.effective_from BETWEEN "
+            + "make_date(s.period // 100, s.period % 100, 1) - INTERVAL 2 MONTH AND "
+            + "last_day(make_date(s.period // 100, s.period % 100, 1)))",
         ),
         "D06": (
             "unexplained personal change-point",
@@ -617,6 +629,14 @@ def _check_referential(con: duckdb.DuckDBPyConnection, report: Report) -> None:
          + "ON d.allowance_code = a.allowance_code WHERE d.allowance_code IS NULL"),
         ("fact_assignment_history.employee_id", "fact_assignment_history f "
          + "LEFT JOIN employee_master e USING (employee_id) WHERE e.employee_id IS NULL"),
+        ("fact_assignment_history.manager_id", "fact_assignment_history f "
+         + "LEFT JOIN employee_master m ON m.employee_id = f.manager_id "
+         + "WHERE f.manager_id IS NOT NULL AND m.employee_id IS NULL"),
+        ("fact_assignment_history.approved_by", "fact_assignment_history f "
+         + "LEFT JOIN employee_master a ON a.employee_id = f.approved_by "
+         + "WHERE f.approved_by IS NOT NULL AND a.employee_id IS NULL"),
+        ("fact_assignment_history.org_unit_id", "fact_assignment_history f "
+         + "LEFT JOIN dim_org_unit o USING (org_unit_id) WHERE o.org_unit_id IS NULL"),
         ("fact_attendance_monthly.employee_id", "fact_attendance_monthly f "
          + "LEFT JOIN employee_master e USING (employee_id) WHERE e.employee_id IS NULL"),
         ("fact_bank_account.employee_id", "fact_bank_account f "
@@ -657,6 +677,22 @@ def _check_referential(con: duckdb.DuckDBPyConnection, report: Report) -> None:
         not (overlaps or open_rows or starts),
         "no gaps or overlaps" if not (overlaps or open_rows or starts)
         else f"gaps={overlaps}, open={open_rows}, bad_start={starts}",
+    )
+
+    drift = _count(
+        con,
+        "SELECT count(*) FROM employee_master e JOIN fact_assignment_history h "
+        + "USING (employee_id) WHERE h.effective_to IS NULL AND ("
+        + "e.grade <> h.grade OR e.job_code <> h.job_code "
+        + "OR e.org_unit_id <> h.org_unit_id OR e.work_site_id <> h.work_site_id "
+        + "OR e.base_salary <> h.base_salary "
+        + "OR e.manager_id IS DISTINCT FROM h.manager_id)",
+    )
+    report.add(
+        "master row is the open interval",
+        drift == 0,
+        "grade, job, unit, site, salary, manager agree" if not drift
+        else f"drifted={drift}",
     )
 
     unrooted = _count(

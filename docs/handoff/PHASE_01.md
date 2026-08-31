@@ -33,8 +33,8 @@ ground truth phase 2 writes will be exact.
   effect recorded in `dq_flags`; nothing that an anomaly predicate reads is ever touched.
 - `dimensions/` — `region`, `site`, `calendar` (tabular Hijri, Saudi holidays, Ramadan windows),
   `grade`, `allowance`, `job`, `org_unit`.
-- `facts/` — `employee` (population pass + wide rows), `assignment` (career synthesis), `banking`,
-  `attendance`, `payroll`, `activity`.
+- `facts/` — `employee` (population pass, `ManagerPool`, wide rows), `assignment` (career
+  synthesis), `banking`, `attendance`, `payroll`, `activity`.
 - `pipeline.py` — generation order and the chunk loop. `__main__.py` — the CLI.
 - `integrity.py` — the validation suite: schema, row counts, referential integrity, domain rules,
   arithmetic, the 34 predicates, determinism, git hygiene.
@@ -44,7 +44,7 @@ ground truth phase 2 writes will be exact.
 `allowance_rules.yaml` corrected.
 
 **Tests** — `services/datagen/tests/`: determinism, entitlement (one case per allowance code),
-identifiers, integrity, distributions. **90 passed, 1 skipped in ~25s** at 1k scale.
+identifiers, integrity, distributions. **91 passed, 1 skipped in ~23s** at 1k scale.
 
 **Root** — `tasks.py` gains `verify 1` and a real `datagen` verb; `conftest.py` puts both services
 on the path for a bare checkout.
@@ -95,11 +95,12 @@ New policy keys: `allowance_load.clean_population_ratio_max` (0.88), all of `pay
 Phase 1 gate — datagen clean population (10k)
 -----------------------------------------------------------------------------------
   ok    schema matches dictionary                          14 tables
-  ok    row counts match manifest                          2,228,124 rows
+  ok    row counts match manifest                          2,228,076 rows
   ok    employee count matches manifest                    10,000 employees
   ok    payroll one row per active period                  no duplicates, no gaps
-  ok    no orphan foreign keys                             14 relationships
+  ok    no orphan foreign keys                             17 relationships
   ok    assignment intervals contiguous                    no gaps or overlaps
+  ok    master row is the open interval                    grade, job, unit, site, salary, manager agree
   ok    org chains reach level 1                           every unit rooted
   ok    enum values in domain                              19 columns
   ok    IBAN check digits (MOD-97)                         10,831 accounts
@@ -151,7 +152,7 @@ Phase 1 gate — datagen clean population (10k)
 PASS — phase 1
 ```
 
-10k generation: **27.4 s, 26 MB on disk**, periods 202409–202608.
+10k generation: **27.6 s, 26 MB on disk**, periods 202409–202608.
 
 | Table | Rows | | Table | Rows |
 |---|---:|---|---|---:|
@@ -159,7 +160,7 @@ PASS — phase 1
 | `dim_site` | 180 | | `fact_assignment_history` | 100,146 |
 | `dim_calendar` | 24 | | `fact_bank_account` | 10,831 |
 | `dim_grade` | 60 | | `fact_payroll_monthly` | 234,267 |
-| `dim_allowance` | 26 | | `fact_payroll_allowance` | 1,402,616 |
+| `dim_allowance` | 26 | | `fact_payroll_allowance` | 1,402,568 |
 | `dim_job` | 1,143 | | `fact_attendance_monthly` | 233,769 |
 | `dim_org_unit` | 1,280 | | `fact_system_activity_monthly` | 233,769 |
 
@@ -244,15 +245,37 @@ status mix             active 92.9, terminated 5.2, suspended 1.1, on_leave 0.8
     dictionary's flat "~12,000 rows" would have meant more units than employees at 10k. Dictionary
     updated.
 
+15. **Careers run into the current placement, and the manager is resolved per interval.** The
+    first cut of this phase set `manager_id` to the employee's current manager on every history row
+    and left the transfer branch a no-op (`current_org = org_unit_id`), so
+    `fact_assignment_history` recorded no manager change and no org move at all — D05 would have
+    had nothing to detect against and no precision denominator. Fixed by making the origin unit and
+    site the *start* of the career and the last transfer the move into the current placement, and
+    by resolving the manager from the unit and grade held in each interval. Manager changes now
+    arise two ways: a transfer moves the employee under a different unit, and a promotion can
+    outgrow the manager who was two grades above. At 10k: **17,733 manager changes across careers,
+    7,278 inside the 24-month observation window covering 6,238 employees (62%)**, 2,806 org-unit
+    moves, 314 site moves, 6,258 distinct approvers. `fact_payroll_monthly.cost_center` had to
+    follow the as-at org unit at the same time, or every transferred employee's pre-transfer
+    periods would have been an unlabelled C08. A new gate check asserts `employee_master` agrees
+    with the open interval on grade, job, unit, site, salary and manager, and three more foreign
+    keys are now checked (17 relationships, up from 14).
+16. **D05's predicate excludes windows containing a grade change.** With real manager changes in
+    place, 97 employee-periods leaked, and every one was a promotion across a `grade_entitlements`
+    boundary (4→5 and 8→9) where the new allowances are added *by policy* and the promotion row
+    explains them. Flagging those would put a collusion alert on every promotion. `ANOMALY_CATALOG`
+    now states the exclusion on both the injection and the detection side, and records that D05
+    needs no planted confounder — the clean population's own manager changes are the denominator.
+
 No other deviations from `docs/specs/datagen.md`; every one above is reflected in the spec.
 
 ## Known gaps / deferred
 
-1. **`manager_id` is constant across an employee's assignment history.** Pass 1 contains no
-   manager-change events at all, so D05 ("allowance mix changing abruptly after a manager change")
-   has nothing to sit against in the clean set. **Phase 2's D05 injector must create the manager
-   change itself**, and should also consider planting benign manager changes so D05 has a
-   precision denominator.
+1. **Org-unit moves cluster early in a career.** Transfers are placed by hazard across the whole
+   service span, so although 2,806 happen at 10k, only a handful land inside the 24-month
+   observation window. Manager changes are plentiful in-window (7,278, covering 62% of employees)
+   because promotions drive them too, so D05 has its denominator — but if phase 2 wants an in-window
+   *org unit* move to inject against, it will need to place one.
 2. **`fact_bank_account.is_known_benign_share` is False on every row** and no IBAN is shared. Phase
    2 plants the spousal shares that make C01's precision measurable.
 3. **Performance is 10k-shaped.** 10k takes 27 s; the per-period entitlement resolution is a Python
@@ -295,17 +318,27 @@ inverse of this phase's headline check: every code injected at or above its floo
 every injected row labelled, confounders present and *unlabelled*, and the per-code predicate counts
 now matching `manifest.injection.by_code` rather than zero.
 
+D05's injector needs care: the clean population already contains manager changes, so the injected
+case is a manager change with allowances appearing and **no grade movement**. Injecting one on top
+of a promotion produces a finding the predicate deliberately ignores.
+
 ## Contract doc changes
 
-- **`docs/DATA_DICTIONARY.md`** — `dim_org_unit` row count qualified as per-tier with the employee
-  placement rule; `months_since_site_change` semantics (999 sentinel, hire is not a site change);
+- **`docs/DATA_DICTIONARY.md`** — `fact_assignment_history` state columns documented as as-at
+  values with the per-interval `manager_id` rule; `fact_payroll_monthly.cost_center` documented as
+  following the as-at org unit; the open interval must agree with `employee_master`; `dim_org_unit`
+  row count qualified as per-tier with the employee placement rule; `months_since_site_change` semantics (999 sentinel, hire is not a site change);
   `has_SEVERANCE` always false because SEVERANCE is `one_off`; `manifest.json` gains
   `reference_date` and `noise`, and the note that `generated_at` is the only wall-clock value in a
   run and `policy_digest` covers all six packs.
-- **`docs/specs/datagen.md`** — `--employees` flag; corrected determinism model; module layout with
+- **`docs/specs/datagen.md`** — careers run into the current placement, with per-interval manager
+  resolution and the as-at payroll cost centre; `--employees` flag; corrected determinism model; module layout with
   `policycore`, `pipeline.py` and `schemas.py`; `policycore` as the shared entitlement core plus the
   `one_off` rule; attendance before payroll in the generation order; the allowance-load repair
   ladder and `months_since_site_change` semantics under `employee_master`; a new "Policy packs this
   service reads" section.
-- **`docs/ANOMALY_CATALOG.md`** — unchanged. All 34 codes are as specified.
+- **`docs/ANOMALY_CATALOG.md`** — D05 only: injection and detection now state that the allowance
+  step must come with no grade change, because a promotion across a `grade_entitlements` boundary
+  adds allowances by policy and carries a row that explains them; plus a note that D05 needs no
+  planted confounder. The other 33 codes are unchanged.
 - **`docs/EVIDENCE_CONTRACT.md`**, **`docs/API_CONTRACT.md`** — unchanged, not touched by this phase.

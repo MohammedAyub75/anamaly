@@ -10,7 +10,7 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 | # | Deliverable | Status | Gate | Date | Tag |
 |---|---|---|---|---|---|
 | 0 | Contract docs, CLAUDE.md, skills, repo scaffold, Compose skeleton, `policy/sites.yaml` (13 regions) | ✅ PASSED | `verify 0` — 24/24 checks | 2026-08-31 | `phase-00` |
-| 1 | `datagen` pass 1 — clean population at 10k, 7 dimensions + 6 facts, 0/34 policy violations | ✅ PASSED | `verify 1` — 53/53 checks | 2026-08-31 | `phase-01` |
+| 1 | `datagen` pass 1 — clean population at 10k, 7 dimensions + 6 facts, 0/34 policy violations | ✅ PASSED | `verify 1` — 54/54 checks | 2026-08-31 | `phase-01` |
 | 2 | Anomaly injection — 34 codes + `labels_anomaly` + confounders | ⬜ not started | `verify 2` | — | — |
 | 3 | Feature build + Layer 1 rule engine + eval harness | ⬜ not started | `verify 3` | — | — |
 | 4 | Layer 2 peer stats + expected-salary model + SHAP | ⬜ not started | `verify 4` | — | — |

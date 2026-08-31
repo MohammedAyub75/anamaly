@@ -271,7 +271,7 @@ Materialised from `policy/allowance_rules.yaml`.
 | `allowance_total` | DECIMAL(12,2) | Sum of the child rows; kept for fast aggregates. |
 | `gross` | DECIMAL(12,2) | `base_pay + allowance_total + overtime_pay + bonus + retro_adjustment` |
 | `net` | DECIMAL(12,2) | `gross − gosi_employee − loan_deduction − absence_deduction` |
-| `cost_center` | VARCHAR(10) | Must match the employee's org assignment (**C08**). |
+| `cost_center` | VARCHAR(10) | The cost centre of the org unit the employee belonged to **in that period**, read from `fact_assignment_history`, not from their current unit. A mismatch against the as-at assignment is **C08**. |
 | `payroll_run_id` | VARCHAR(16) | |
 | `paid_flag` | BOOLEAN | False = posted but not disbursed. |
 
@@ -299,7 +299,7 @@ adding an allowance code must never mean a schema migration. The wide view is bu
 |---|---|---|
 | `employee_id` | VARCHAR(10) | |
 | `effective_from` / `effective_to` | DATE | `effective_to` null = current. No gaps, no overlaps. |
-| `grade`, `job_code`, `org_unit_id`, `work_site_id`, `manager_id` | | State during the interval. |
+| `grade`, `job_code`, `org_unit_id`, `work_site_id`, `manager_id` | | State during the interval — **as it was then**, not as it is now. `manager_id` is resolved per interval (the lowest-graded employee at least two grades above, in that unit or a parent), so it changes when a transfer moves the employee and when a promotion outgrows the previous manager. A constant `manager_id` would leave **D05** with nothing to detect against. |
 | `base_salary` | DECIMAL(12,2) | Salary at the start of the interval. |
 | `change_reason` | ENUM | `hire`, `promotion`, `transfer`, `regrade`, `increment`, `acting`, `return_from_acting`, `termination` |
 | `approved_by` | VARCHAR(10) | FK → `employee_master`. Self-approval is **C05**. |
@@ -405,7 +405,8 @@ being evaluated against stale ground truth. The eval harness fails loudly on a d
 - `employee_master` × `dim_calendar` = exactly `fact_payroll_monthly` row count (no gaps, no dupes)
   for employees active in that period.
 - `fact_assignment_history` intervals per employee are contiguous and non-overlapping, starting at
-  `hire_date`.
+  `hire_date`. The single open interval (`effective_to IS NULL`) must agree with `employee_master`
+  on grade, job code, org unit, work site, base salary and manager.
 - `manager_id` graph is acyclic; every `org_unit_id` chain terminates at a level-1 unit.
 - Every IBAN passes MOD-97; every `national_id`/`iqama_no` passes its check digit.
 - `gross` and `net` reconcile with their components to the stored cent.

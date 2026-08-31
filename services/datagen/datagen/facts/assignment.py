@@ -16,6 +16,14 @@ Three spacings are load-bearing, and all three come from `policy/`:
 * a site change only from `site_change_min_grade` up, because RELOCATION is a
   flat 3,500 SAR and on a junior salary that one allowance would dominate the
   pay packet.
+
+A career runs *into* the employee's current placement rather than away from it:
+the origin unit and site are where they started, and the last transfer is what
+moved them to where `employee_master` says they are now.  Built the other way
+round, a transfer would move an employee off the site the headcount weights put
+them on, and the manager and unit-head resolution -- which both run over the
+whole population before any career exists -- would be describing a placement the
+history had already abandoned.
 """
 
 from __future__ import annotations
@@ -47,6 +55,12 @@ class Interval:
     base_cents: int
     change_reason: str
     safety_critical: bool = False
+    # Resolved per interval, once the whole population exists: the manager two
+    # or more grades above in this unit or a parent. It changes when the grade
+    # outgrows the old manager and when a transfer moves the employee, which is
+    # what gives D05 something to sit against.
+    manager_id: str | None = None
+    approved_by: str | None = None
 
 
 @dataclass
@@ -88,9 +102,10 @@ def build_career(
     nationality_class: str,
     job_for_grade,
     org_unit_id: str,
+    origin_org_unit_id: str,
     site_index: int,
+    origin_site_index: int,
     min_grade: int,
-    alt_site_index: int,
     band_position: float,
     draws: dict[str, float],
     terminated_on: date | None,
@@ -156,9 +171,13 @@ def build_career(
     total_steps = len(events) - 1
     career = Career()
     current_grade = start_grade
-    current_site = site_index
-    current_org = org_unit_id
     steps_in_grade = 1
+
+    # Everything before the last transfer happened at the origin. Only the
+    # senior grades are relocated across sites; a junior transfer is an org
+    # move within the same posting.
+    moved_on = transfer_months[-1] if transfer_months else None
+    relocated = moved_on is not None and grade >= site_change_min_grade
 
     for index, (month, reason) in enumerate(events):
         if reason == "promotion":
@@ -166,10 +185,9 @@ def build_career(
             steps_in_grade = 1
         elif reason == "increment":
             steps_in_grade += 1
-        elif reason == "transfer":
-            current_org = org_unit_id
-            if current_grade >= site_change_min_grade:
-                current_site = alt_site_index
+        at_origin = moved_on is not None and month < moved_on
+        current_org = origin_org_unit_id if at_origin else org_unit_id
+        current_site = origin_site_index if (at_origin and relocated) else site_index
         # Earlier intervals sit slightly lower in the band than the current
         # one, so pay rises monotonically and every rise has a row here.
         remaining = total_steps - index
@@ -196,7 +214,7 @@ def build_career(
             career.last_promotion = career.intervals[-1].start
         elif reason == "increment":
             career.last_increment = career.intervals[-1].start
-        elif reason == "transfer" and current_site != site_index:
+        elif reason == "transfer" and relocated and month == moved_on:
             career.site_change = career.intervals[-1].start
 
     if terminated_on is not None:
@@ -243,8 +261,6 @@ def rows(
     employee_ids: np.ndarray,
     careers: list[Career],
     site_ids: list[str],
-    approvers: np.ndarray,
-    managers: np.ndarray,
 ) -> dict[str, Any]:
     """Flatten a chunk's careers into `fact_assignment_history` columns."""
     out_ids: list[str] = []
@@ -269,10 +285,10 @@ def rows(
             jobs.append(interval.job_code)
             orgs.append(interval.org_unit_id)
             sites.append(site_ids[interval.site_index])
-            manager_col.append(managers[position])
+            manager_col.append(interval.manager_id)
             salaries.append(interval.base_cents)
             reasons.append(interval.change_reason)
-            approved.append(approvers[position])
+            approved.append(interval.approved_by)
 
     return {
         "employee_id": out_ids,

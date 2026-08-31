@@ -116,15 +116,11 @@ def _write_chunk_facts(
     patterns = np.array([r["work_pattern"] for r in records], dtype=object)
     grades = np.array([r["grade"] for r in records], dtype=np.int64)
     safety = np.array([safety_by_job[r["job_code"]] for r in records], dtype=bool)
-    cost_centers = [r["cost_center"] for r in records]
+    cost_center_by_unit = dict(zip(org.ids, org.cost_centers, strict=True))
 
     writer.write(
         "fact_assignment_history",
-        assignment_fact.rows(
-            cfg, np.array(ids, dtype=object), careers, policy.site_ids,
-            population.approver[start:start + count],
-            population.manager[start:start + count],
-        ),
+        assignment_fact.rows(cfg, np.array(ids, dtype=object), careers, policy.site_ids),
         chunk=chunk,
     )
 
@@ -183,7 +179,8 @@ def _write_chunk_facts(
 
         monthly, allowance_rows = payroll.build_period(
             cfg, policy, resolver, period, records, careers, offsets, settlement,
-            sites, safety, cost_centers, by_offset, plan, late, calendar_days[period],
+            sites, safety, cost_center_by_unit, by_offset, plan, late,
+            calendar_days[period],
         )
         writer.write("fact_payroll_monthly", monthly, chunk=chunk, period=period)
         writer.write("fact_payroll_allowance", allowance_rows, chunk=chunk, period=period)

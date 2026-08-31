@@ -178,7 +178,7 @@ def build_period(
     settlement: list[bool],
     sites,
     safety: np.ndarray,
-    cost_centers: list[str],
+    cost_center_by_unit: dict[str, str],
     attendance_by_offset: dict[int, tuple[float, int]],
     plan: PayrollPlan,
     late: np.ndarray,
@@ -237,7 +237,7 @@ def build_period(
                 monthly, employee, period, base=0, overtime_hours=0.0, overtime=0,
                 bonus=0, retro=0, gosi_employee=0, gosi_employer=0, loan=0,
                 absence=0, allowance_total=amount,
-                cost_center=cost_centers[offset],
+                cost_center=cost_center_by_unit[interval.org_unit_id],
                 run_id=run_id, paid=not record["payroll_hold_flag"],
             )
             continue
@@ -281,7 +281,10 @@ def build_period(
             overtime=overtime_pay, bonus=bonus, retro=retro,
             gosi_employee=gosi_employee, gosi_employer=gosi_employer, loan=loan,
             absence=absence, allowance_total=allowance_total,
-            cost_center=cost_centers[offset],
+            # Charged to the unit the employee belonged to THEN. Posting a
+            # transferred employee to the unit they hold today would put the
+            # charge on a cost centre they had already left, which is C08.
+            cost_center=cost_center_by_unit[interval.org_unit_id],
             run_id=next_run_id if late[offset] else run_id,
             paid=not record["payroll_hold_flag"],
         )

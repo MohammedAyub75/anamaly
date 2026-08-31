@@ -129,6 +129,39 @@ def test_allowance_load_stays_below_the_injection_range(con, policy):
     assert 0.2 <= float(median) <= ceiling
 
 
+def test_managers_change_over_a_career(con):
+    """D05 needs manager changes the clean population produces on its own.
+
+    They arrive two ways: a transfer moves the employee under a different unit,
+    and a promotion can outgrow the manager who was two grades above. Without
+    them the clean set has no manager-change events, so D05 would have nothing
+    to hide among and no precision denominator.
+    """
+    changes, people = con.execute(
+        "WITH moves AS (SELECT employee_id, effective_from, manager_id, "
+        "lag(manager_id) OVER (PARTITION BY employee_id ORDER BY effective_from) "
+        "AS prior FROM fact_assignment_history) "
+        "SELECT count(*), count(DISTINCT employee_id) FROM moves m, "
+        "(SELECT min(period) AS lo, max(period) AS hi FROM dim_calendar) w "
+        "WHERE m.prior IS NOT NULL AND m.manager_id IS DISTINCT FROM m.prior "
+        "AND year(m.effective_from) * 100 + month(m.effective_from) "
+        "BETWEEN w.lo AND w.hi"
+    ).fetchone()
+    total = con.execute("SELECT count(*) FROM employee_master").fetchone()[0]
+    assert changes > 0, "no manager changes inside the observation window"
+    assert 0.15 < people / total < 0.90, (people, total)
+
+
+def test_nobody_approves_their_own_assignment(con):
+    """Self-approval is C05; the approver is the manager at the time."""
+    assert con.execute(
+        "SELECT count(*) FROM fact_assignment_history WHERE approved_by = employee_id"
+    ).fetchone()[0] == 0
+    assert con.execute(
+        "SELECT count(DISTINCT approved_by) FROM fact_assignment_history"
+    ).fetchone()[0] > 1
+
+
 def test_realism_noise_is_present_but_never_labelled(con, slice_lake):
     """Data-quality flags are not anomalies; they exist so the two differ."""
     flagged = con.execute(

@@ -177,6 +177,16 @@ facts. Later steps read earlier output from Parquet rather than holding it in me
 7. `employee_master` — see below.
 8. `fact_assignment_history` — built from each employee's synthesised career, ending in their
    current state. Contiguous, non-overlapping intervals starting at `hire_date`.
+   A career runs **into** the placement `employee_master` records, not away from it: the origin unit
+   and site are where the employee started and the last transfer is what moved them to where they
+   are now. Built the other way round, a transfer would move an employee off the site the headcount
+   weights put them on, and the manager and unit-head resolution — which both run over the whole
+   population before any career exists — would describe a placement the history had already left.
+   `manager_id` is resolved **per interval** from the unit and grade held at the time, so it changes
+   at a transfer and whenever a promotion outgrows the previous manager; `approved_by` is that
+   manager, never the employee. `fact_payroll_monthly.cost_center` follows the as-at org unit for
+   the same reason — posting a transferred employee to the unit they hold today would charge a cost
+   centre they had already left, which is C08.
 9. `fact_bank_account` — IBAN history; most employees have one row, some have a change.
 10. `fact_attendance_monthly` — per period, consistent with work pattern and the calendar.
 11. `fact_payroll_monthly` + `fact_payroll_allowance` — per period, chunked. Attendance is built
@@ -224,7 +234,10 @@ separable and the evaluation meaningless.
   Terminated employees stop being paid the month after `termination_date`, plus one legitimate
   `SEVERANCE` settlement month.
 - **`manager_id`**: derived from the org hierarchy — a manager is in the same or a parent unit and
-  is at least two grades higher. Must be acyclic; assert it.
+  is at least two grades higher. Acyclicity then falls out for free rather than needing an
+  assertion, because a manager's grade is strictly greater than their report's. The same resolver
+  answers the question at any point in a career, which is what makes `fact_assignment_history`
+  carry real manager changes.
 - **Certifications**: safety-critical jobs get their required certifications, all valid in pass 1.
 
 Then apply `entitlement.py` and set the 26 `has_<CODE>` flags plus `allowance_total_monthly` and

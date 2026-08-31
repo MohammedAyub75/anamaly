@@ -305,12 +305,19 @@ workhorse; the sequence autoencoder is only built if CUSUM proves insufficient (
 
 ### D05 — Allowance mix changing abruptly after a manager change
 **Severity** HIGH · **Rate** 0.06% · **Detector** L2 + L4
-- **Injection**: change `manager_id`, then within 1–2 periods add 2–3 allowances worth ≥ 20% of base.
+- **Injection**: change `manager_id`, then within 1–2 periods add 2–3 allowances worth ≥ 20% of base,
+  **with no grade change** — that is what makes the allowances unexplained.
 - **Detection**: change-point in `allowance_total` within 2 periods of a manager change in
-  `fact_assignment_history`.
-- **Evidence**: manager before/after, the allowances added and when, the amount delta.
+  `fact_assignment_history`, **excluding windows containing a grade change**. A promotion that
+  crosses into a new `grade_entitlements` band adds allowances *by policy* and carries a promotion
+  row that explains them; flagging those would put a collusion alert on every promotion.
+- **Evidence**: manager before/after, the allowances added and when, the amount delta, and the
+  absence of any grade movement.
 - **Actions**: review the new manager's other reports for the same pattern — this is a collusion
   precursor, and it is why **D07** exists.
+- **Confounder**: none needs planting. Managers change legitimately in the clean population — at a
+  transfer, and whenever a promotion outgrows the previous manager — so roughly half the workforce
+  carries a manager change inside the observation window. That is D05's precision denominator.
 
 ### D06 — Personal change-point vs own baseline
 **Severity** MEDIUM · **Rate** 0.05% · **Detector** L2 (CUSUM)
