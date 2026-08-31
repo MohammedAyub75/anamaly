@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Data lake and model artifacts — NEVER commit these.
+# The Parquet lake reaches 3-6 GB at 1m scale; model binaries are large.
+# See docs/PLAN.md section 9.5.
+# ---------------------------------------------------------------------------
+data/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.pt
+*.pth
+*.onnx
+*.joblib
+*.pkl
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node / frontend
+node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
+logs/
