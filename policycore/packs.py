@@ -32,6 +32,7 @@ POLICY_FILES = (
     "population.yaml",
     "fusion.yaml",
     "injection.yaml",
+    "peer_stats.yaml",
 )
 
 NATIONALITY_CLASSES = ("saudi", "gcc", "expat")
@@ -331,6 +332,11 @@ class PolicyPack:
     def injection(self) -> dict[str, Any]:
         """Pass-2 dials: rates, magnitudes, windows and the collision guards."""
         return self.raw["injection.yaml"]
+
+    @property
+    def peer_stats(self) -> dict[str, Any]:
+        """Layer-2 dials: robust-statistic guards, the salary model, the codes."""
+        return self.raw["peer_stats.yaml"]
 
     # ------------------------------------------------------------- validation
 

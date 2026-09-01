@@ -23,16 +23,18 @@ from .features.build import cache_key as features_cache_key
 from .features.build import feature_columns
 from .lake import connect
 from .layers.l1_rules import L1Result, RuleSet, run_rules
+from .layers.l2_peer import L2Result, run_peer
 
 # In execution order. Later stages are declared here so `--stages` has a stable
 # surface and asking for one that is not built yet fails loudly.
 STAGES: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion")
 
-BUILT: tuple[str, ...] = ("features", "l1")
+BUILT: tuple[str, ...] = ("features", "l1", "l2")
 
-STAGE_PHASE = {"l2": 4, "l3": 5, "fusion": 6}
+STAGE_PHASE = {"l3": 5, "fusion": 6}
 
 HITS_FILE = "l1_hits.parquet"
+L2_HITS_FILE = "l2_hits.parquet"
 STATE_FILE = "_stages.json"
 
 
@@ -51,7 +53,14 @@ class RunResult:
     stage_cached: dict[str, bool] = field(default_factory=dict)
     rows: dict[str, int] = field(default_factory=dict)
     l1: L1Result | None = None
+    l2: L2Result | None = None
     hits_path: Path | None = None
+    l2_hits_path: Path | None = None
+
+    @property
+    def findings(self) -> list[dict]:
+        """Every layer's hits in one list -- what phase 6 fuses and scores."""
+        return (self.l1.hits if self.l1 else []) + (self.l2.hits if self.l2 else [])
 
     @property
     def runtime(self) -> dict[str, float]:
@@ -63,6 +72,21 @@ def rule_digest(ruleset: RuleSet) -> str:
     digest = hashlib.sha256()
     for rule in sorted(ruleset.rules, key=lambda r: r.id):
         digest.update(rule.path.read_bytes())
+    return "sha256:" + digest.hexdigest()
+
+
+def layer2_digest(policy) -> str:
+    """A hash over the layer-2 detectors and their dials.
+
+    The policy digest already covers `peer_stats.yaml`; this adds the two
+    modules that turn it into SQL, for the same reason the feature cache keys
+    on its own `.sql` files -- editing a detector must invalidate the stage, or
+    the next run silently scores the previous one.
+    """
+    digest = hashlib.sha256()
+    for name in ("l2_peer.py", "l2_salary.py"):
+        digest.update((Path(__file__).parent / "layers" / name).read_bytes())
+    digest.update(json.dumps(policy.peer_stats, sort_keys=True).encode("utf-8"))
     return "sha256:" + digest.hexdigest()
 
 
@@ -103,10 +127,10 @@ def resolve_stages(requested: str | list[str] | None) -> list[str]:
     return [s for s in STAGES if s in names]
 
 
-def write_hits(cfg: DetectorConfig, l1: L1Result) -> Path:
-    """The layer-1 findings as Parquet, the input phase 6 fuses and scores."""
+def write_hits(cfg: DetectorConfig, result, filename: str = HITS_FILE) -> Path:
+    """One layer's findings as Parquet, the input phase 6 fuses and scores."""
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    path = cfg.run_dir / HITS_FILE
+    path = cfg.run_dir / filename
     schema = {
         "employee_id": pl.Utf8,
         "anomaly_code": pl.Utf8,
@@ -126,16 +150,12 @@ def write_hits(cfg: DetectorConfig, l1: L1Result) -> Path:
         "recommended_actions": pl.List(pl.Utf8),
         "evidence_json": pl.Utf8,
     }
-    frame = pl.DataFrame(l1.hits, schema=schema)
+    frame = pl.DataFrame(result.hits, schema=schema)
     frame.write_parquet(path)
     return path
 
 
-def read_hits(cfg: DetectorConfig) -> L1Result:
-    """Load a cached layer-1 pass back into the shape the harness scores."""
-    path = cfg.run_dir / HITS_FILE
-    frame = pl.read_parquet(path)
-    result = L1Result(seconds=0.0, hits=frame.to_dicts())
+def _recount(result) -> None:
     for row in result.hits:
         code = row["anomaly_code"]
         result.by_code[code] = result.by_code.get(code, 0) + 1
@@ -143,6 +163,24 @@ def read_hits(cfg: DetectorConfig) -> L1Result:
         result.employees_by_code[code] = len(
             {h["employee_id"] for h in result.hits if h["anomaly_code"] == code}
         )
+
+
+def read_hits(cfg: DetectorConfig) -> L1Result:
+    """Load a cached layer-1 pass back into the shape the harness scores."""
+    frame = pl.read_parquet(cfg.run_dir / HITS_FILE)
+    result = L1Result(seconds=0.0, hits=frame.to_dicts())
+    _recount(result)
+    return result
+
+
+def read_peer_hits(cfg: DetectorConfig) -> L2Result:
+    """Load a cached layer-2 pass back. The cohort report is not cached: it is
+    a description of the run rather than an input to it, and rebuilding it
+    would mean re-running the stage the cache exists to skip."""
+    frame = pl.read_parquet(cfg.run_dir / L2_HITS_FILE)
+    result = L2Result(seconds=0.0, hits=frame.to_dicts())
+    _recount(result)
+    result.codes = tuple(sorted(result.by_code))
     return result
 
 
@@ -206,6 +244,34 @@ def run(
             _save_state(cfg, state)
             if log:
                 log(f"l1        {l1.total:,} findings  {l1.seconds:.2f}s")
+
+    if "l2" in wanted:
+        key = "|".join(
+            [features_cache_key(cfg, policy), layer2_digest(policy), cfg.run_id]
+        )
+        cached = cfg.run_dir / L2_HITS_FILE
+        if not force and state.get("l2") == key and cached.exists():
+            result.l2 = read_peer_hits(cfg)
+            result.l2_hits_path = cached
+            result.stage_seconds["l2 (cached)"] = float(state.get("l2_seconds", 0.0))
+            result.stage_cached["l2"] = True
+            if log:
+                log(f"l2        {len(result.l2.hits):,} findings  (cached)")
+        else:
+            con = connect(cfg, features=True, threads=threads)
+            try:
+                l2 = run_peer(con, policy, log=log)
+            finally:
+                con.close()
+            result.l2 = l2
+            result.l2_hits_path = write_hits(cfg, l2, L2_HITS_FILE)
+            result.stage_seconds["l2"] = l2.seconds
+            result.stage_cached["l2"] = False
+            state["l2"] = key
+            state["l2_seconds"] = l2.seconds
+            _save_state(cfg, state)
+            if log:
+                log(f"l2        {l2.total:,} findings  {l2.seconds:.2f}s")
 
     result.seconds = round(time.perf_counter() - started, 3)
     return result

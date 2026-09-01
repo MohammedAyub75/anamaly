@@ -169,3 +169,104 @@ class DetectorPolicy:
     @property
     def separation(self) -> dict:
         return self.pack.payroll["separation"]
+
+    # -------------------------------------------------------- layer 2 (peer)
+
+    @property
+    def peer_stats(self) -> dict:
+        """`policy/peer_stats.yaml`: the layer-2 dials, severities and wording."""
+        return self.pack.peer_stats
+
+    @property
+    def robust(self) -> dict:
+        return self.peer_stats["robust"]
+
+    @property
+    def expected_salary(self) -> dict:
+        return self.peer_stats["expected_salary"]
+
+    @property
+    def cusum(self) -> dict:
+        return self.peer_stats["cusum"]
+
+    @cached_property
+    def peer_codes(self) -> dict[str, dict]:
+        return dict(self.peer_stats["codes"])
+
+    def peer_threshold(self, code: str, name: str) -> float:
+        """One code's dial. Missing is a bug in the pack, not a default to guess."""
+        thresholds = self.peer_codes[code].get("thresholds") or {}
+        if name not in thresholds:
+            raise KeyError(f"peer_stats.yaml: codes.{code}.thresholds.{name} is missing")
+        return float(thresholds[name])
+
+    # The peer layer's cross-pack numbers. Each of these already has a home in
+    # another pack and is read from there: two copies of one threshold is how an
+    # injector and a detector drift apart.
+
+    @property
+    def peer_cohort(self) -> dict:
+        return self.fusion["peer_cohort"]
+
+    @property
+    def robust_z_threshold(self) -> float:
+        return float(self.peer_cohort["robust_z_threshold"])
+
+    @property
+    def percentile_flag_high(self) -> float:
+        return float(self.peer_cohort["percentile_flag_high"])
+
+    @property
+    def percentile_flag_low(self) -> float:
+        return float(self.peer_cohort["percentile_flag_low"])
+
+    @property
+    def overpayment_tolerance_pct(self) -> float:
+        return float(self.band_policy["overpayment_tolerance_pct"])
+
+    @property
+    def underpayment_tolerance_pct(self) -> float:
+        return float(self.band_policy["underpayment_tolerance_pct"])
+
+    @property
+    def max_increments_per_12m(self) -> int:
+        return int(self.band_policy["max_increments_per_12m"])
+
+    @property
+    def max_grade_jump_per_24m(self) -> int:
+        return int(self.band_policy["max_grade_jump_per_24m"])
+
+    @property
+    def legal_overtime_hours(self) -> float:
+        return float(self.overtime["legal_monthly_max_hours"])
+
+    @property
+    def bonus_pct_by_rating(self) -> dict[int, float]:
+        return {
+            int(k): float(v)
+            for k, v in self.pack.payroll["bonus"]["pct_of_base_by_rating"].items()
+        }
+
+    @property
+    def max_retro_entries_clean(self) -> int:
+        return int(self.pack.payroll["retro_adjustment"]["max_per_employee_clean"])
+
+    def allowance_label(self, code: str) -> str:
+        """The display name a reviewer reads. Never the raw code (CLAUDE.md)."""
+        return self.pack.allowances[code].name_en
+
+    def bonus_entitlement_sql(self, rating: str, base: str) -> str:
+        """The bonus the performance rating entitles the employee to, as SQL."""
+        whens = " ".join(
+            f"WHEN {r} THEN {base} * {pct}"
+            for r, pct in sorted(self.bonus_pct_by_rating.items())
+        )
+        return f"CASE {rating} {whens} ELSE NULL END"
+
+    def allowance_label_case(self, column: str = "allowance_code") -> str:
+        """Allowance code -> display name, as SQL. No raw code reaches a reviewer."""
+        whens = " ".join(
+            f"WHEN '{code}' THEN '{self.allowance_label(code)}'"
+            for code in self.allowance_codes
+        )
+        return f"CASE {column} {whens} ELSE {column} END"

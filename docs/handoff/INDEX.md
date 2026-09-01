@@ -13,7 +13,7 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 | 1 | `datagen` pass 1 — clean population at 10k, 7 dimensions + 6 facts, 0/34 policy violations | ✅ PASSED | `verify 1` — 54/54 checks | 2026-08-31 | `phase-01` |
 | 2 | `datagen` pass 2 — 34 anomaly codes injected + `labels_anomaly` + 7 confounder types | ✅ PASSED | `verify 2` — 44/44 checks, 34/34 codes at 100% agreement | 2026-08-31 | `phase-02` |
 | 3 | Feature build + Layer 1 rule engine + eval harness | ✅ PASSED | `verify 3` — 34/34 checks, 17/17 layer-1 codes at 100% recall and precision | 2026-09-01 | `phase-03` |
-| 4 | Layer 2 peer stats + expected-salary model + SHAP | ⬜ not started | `verify 4` | — | — |
+| 4 | Layer 2 peer stats + expected-salary model + SHAP | ✅ PASSED | `verify 4` — 31/31 checks, 12/12 layer-2 codes at 100% recall, family B precision 99% | 2026-09-01 | `phase-04` |
 | 5 | Layer 3 Isolation Forest + autoencoder + graph checks | ⬜ not started | `verify 5` | — | — |
 | 6 | Fusion, severity banding, evidence bundle, financial impact | ⬜ not started | `verify 6` | — | — |
 | 7 | Scale-up 100k → 1M, batch tuning, `agg_alerts_by_site_month` | ⬜ not started | `verify 7` | — | — |
@@ -27,13 +27,13 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 
 ## Next session
 
-Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_03.md`. Implement phase 4 — layer 2
-peer statistics, the expected-salary model and SHAP. First command:
+Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_04.md`. Implement phase 5 — layer 3:
+isolation forest, the tabular autoencoder and the graph checks. First command:
 
 ```
-python tasks.py verify 3
+python tasks.py verify 4
 ```
 
-(confirms the feature store, the rule engine and the harness are intact before building the layer
-that reads them). The seven family-B codes sitting at 0% recall in `docs/EVAL_REPORT.md` are the
-work.
+(confirms the feature store, both detection layers and the harness are intact before building the
+layer that joins them). The five codes still at 0% recall in `docs/EVAL_REPORT.md` are the work:
+C01, C02, C03, C05 and C06 — four of the five graph-shaped.

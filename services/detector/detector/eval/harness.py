@@ -24,6 +24,8 @@ import duckdb
 from ..config import DetectorConfig
 from ..lake import connect_labels
 from ..layers.l1_rules import L1Result, RuleSet
+from ..layers.l2_peer import CohortAssignment, L2Result
+from ..layers.l2_salary import SalaryExpectation
 
 # Precision is reported at the depths a reviewer actually works to. @100 matters
 # most: those are the alerts somebody opens on Monday morning.
@@ -36,13 +38,13 @@ PRECISION_AT = (100, 1000, 5000)
 # yet reads as "not built" rather than as a failure.
 PLANNED: dict[str, str] = {
     **{f"A{n:02d}": "L1 rule" for n in range(1, 13)},
-    "B01": "L2 peer (phase 4)",
-    "B02": "L2 peer (phase 4)",
-    "B03": "L2 peer (phase 4)",
-    "B04": "L2 + L1 join (phase 4)",
-    "B05": "L2 peer (phase 4)",
-    "B06": "L2 peer (phase 4)",
-    "B07": "L2 peer (phase 4)",
+    "B01": "L2 peer",
+    "B02": "L2 peer",
+    "B03": "L2 peer",
+    "B04": "L2 + L1 join",
+    "B05": "L2 peer",
+    "B06": "L2 peer",
+    "B07": "L2 peer",
     "C01": "L3 graph (phase 5)",
     "C02": "L3 graph (phase 5)",
     "C03": "L3 ML + rules (phase 5)",
@@ -51,13 +53,13 @@ PLANNED: dict[str, str] = {
     "C06": "L3 graph (phase 5)",
     "C07": "L1 rule",
     "C08": "L1 rule",
-    "D01": "L2 peer (phase 4)",
-    "D02": "L2 peer (phase 4)",
+    "D01": "L2 peer",
+    "D02": "L2 peer",
     "D03": "L1 rule",
     "D04": "L1 rule",
-    "D05": "L2 + L4 (phase 4)",
-    "D06": "L2 CUSUM (phase 4)",
-    "D07": "L2 aggregate (phase 4)",
+    "D05": "L2 + L4",
+    "D06": "L2 CUSUM",
+    "D07": "L2 aggregate",
 }
 
 
@@ -122,6 +124,12 @@ class EvalReport:
     unlabelled_hits: int
     seconds: float
     warnings: list[str] = field(default_factory=list)
+    # Layer 2's description of itself: which rung of the cohort ladder every
+    # employee ended up on, and what the expected-salary model looked like.
+    # Reported beside recall because a cohort that fell back to `grade` alone
+    # explains a weak peer signal better than any threshold does.
+    cohorts: CohortAssignment | None = None
+    salary: SalaryExpectation | None = None
 
     # ------------------------------------------------------------ summaries
 
@@ -153,8 +161,10 @@ class EvalReport:
         return [c for c in self.codes if not c.built]
 
 
-def _register_hits(con: duckdb.DuckDBPyConnection, l1: L1Result) -> None:
-    """Put the layer-1 hits in front of DuckDB so scoring is one set-based pass."""
+def _register_hits(
+    con: duckdb.DuckDBPyConnection, findings: list[dict[str, Any]]
+) -> None:
+    """Put every layer's hits in front of DuckDB so scoring is one set-based pass."""
     con.execute(
         """
         CREATE OR REPLACE TEMP TABLE hits (
@@ -164,7 +174,7 @@ def _register_hits(con: duckdb.DuckDBPyConnection, l1: L1Result) -> None:
         )
         """
     )
-    if l1.hits:
+    if findings:
         con.executemany(
             "INSERT INTO hits VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -173,13 +183,15 @@ def _register_hits(con: duckdb.DuckDBPyConnection, l1: L1Result) -> None:
                     h["period_from"], h["period_to"],
                     h["financial_impact_monthly"], h["financial_impact_cumulative"],
                 )
-                for h in l1.hits
+                for h in findings
             ],
         )
 
 
 def _code_scores(
-    con: duckdb.DuckDBPyConnection, ruleset: RuleSet, planned: dict[str, str]
+    con: duckdb.DuckDBPyConnection,
+    detectors: dict[str, str],
+    planned: dict[str, str],
 ) -> list[CodeScore]:
     """Per-code recall and precision, over every code the catalogue defines.
 
@@ -222,7 +234,6 @@ def _code_scores(
         ).fetchall()
     }
 
-    implemented = set(ruleset.codes)
     out: list[CodeScore] = []
     for code in sorted(set(injected) | set(raised)):
         family, count = injected.get(code, (code[0], 0))
@@ -231,9 +242,8 @@ def _code_scores(
             CodeScore(
                 code=code,
                 family=family,
-                detector=("L1 rule" if code in implemented
-                          else planned.get(code, "pending")),
-                built=code in implemented,
+                detector=detectors.get(code, planned.get(code, "pending")),
+                built=code in detectors,
                 injected=count,
                 detected=detected,
                 hits=raised.get(code, 0),
@@ -308,6 +318,7 @@ def evaluate(
     cfg: DetectorConfig,
     ruleset: RuleSet,
     l1: L1Result,
+    l2: L2Result | None = None,
     *,
     planned: dict[str, str] | None = None,  # defaults to PLANNED
     runtime: dict[str, float] | None = None,
@@ -321,10 +332,14 @@ def evaluate(
             "this lake carries no ground truth (generated with --no-inject); "
             "there is nothing to evaluate against"
         )
+    detectors = {code: "L1 rule" for code in ruleset.codes}
+    detectors.update(l2.detectors if l2 else {})
+    findings = list(l1.hits) + (list(l2.hits) if l2 else [])
+
     con = connect_labels(cfg)
     try:
-        _register_hits(con, l1)
-        codes = _code_scores(con, ruleset, planned or PLANNED)
+        _register_hits(con, findings)
+        codes = _code_scores(con, detectors, planned or PLANNED)
         confounders = _confounder_scores(con)
         precision = _precision_at(con)
         severity = dict(
@@ -367,6 +382,8 @@ def evaluate(
         rule_digest=rule_digest,
         unlabelled_hits=int(unlabelled[0]) if unlabelled else 0,
         seconds=round(time.perf_counter() - started, 3),
+        cohorts=l2.cohorts if l2 else None,
+        salary=l2.salary if l2 else None,
     )
     if not budget.get("by_code"):
         report.warnings.append("lake manifest carries no injection counts")
@@ -378,6 +395,6 @@ def evaluate(
     return report
 
 
-def hit_rows(l1: L1Result) -> list[dict[str, Any]]:
+def hit_rows(result) -> list[dict[str, Any]]:
     """The hits as plain dicts, for the Parquet writer in `run.py`."""
-    return list(l1.hits)
+    return list(result.hits)

@@ -405,8 +405,13 @@ gates read it; it is what makes a run reproducible.
 
 `generated_at` is the only wall-clock value anywhere in a run, and it is in the manifest rather than
 in the Parquet so that two runs with the same seed stay byte-identical. `reference_date` and `noise`
-record the two other arguments that change what was generated. `policy_digest` covers all seven packs
-under `policy/` (`injection.yaml` joined them in phase 2). Pass 1 writes `injection` with zeroes;
+record the two other arguments that change what was generated. `policy_digest` covers all eight packs
+under `policy/` (`injection.yaml` joined them in phase 2, `peer_stats.yaml` in phase 4). A pack the
+generator does not read still belongs in the digest — `peer_stats.yaml` decides what a *detector*
+does, and an alert scored under a superseded policy must be visibly stale rather than silently
+wrong. Adding a pack does not invalidate an existing lake (a digest the manifest has never seen is
+not a mismatch), but the generator's integrity check compares the full map, so regenerate after a
+phase that adds one. Pass 1 writes `injection` with zeroes;
 pass 2 fills it in, and a `--no-inject` run leaves the zeroes, which the eval harness reads as "no
 ground truth in this lake". `by_code` counts **employees carrying that code**, not rows.
 

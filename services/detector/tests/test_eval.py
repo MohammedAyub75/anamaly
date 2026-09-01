@@ -35,23 +35,40 @@ def test_family_a_is_perfect(evaluation) -> None:
 
 
 def test_every_built_detector_finds_its_injections(evaluation) -> None:
+    """Recall and dating are absolute; precision is where the two layers differ.
+
+    A layer-1 rule quotes a broken clause, so a false positive is a bug in the
+    rule. A layer-2 statistic says "this is unusual for somebody like them",
+    which is a judgement, and holding it to 100% would mean tuning until the
+    detector only fires on what we already planted.
+    """
     for row in evaluation.implemented:
         assert row.injected, row.code
         assert row.recall == 1.0, f"{row.code} recall {row.recall}"
-        assert row.precision == 1.0, f"{row.code} precision {row.precision}"
         assert row.window_rate == 1.0, f"{row.code} window agreement {row.window_rate}"
+        floor = 1.0 if row.detector == "L1 rule" else 0.75
+        assert row.precision >= floor, f"{row.code} precision {row.precision}"
 
 
-def test_no_finding_is_unaccounted_for(evaluation) -> None:
-    assert evaluation.unlabelled_hits == 0
+def test_layer_1_accounts_for_every_finding_it_raises(evaluation) -> None:
+    """Unchanged from phase 3: a rule hit with no ground truth behind it is a bug."""
+    rules = [row for row in evaluation.implemented if row.detector == "L1 rule"]
+    assert rules
+    assert sum(row.hits - row.true_positives for row in rules) == 0
     assert not evaluation.zero_recall
 
 
+def test_unaccounted_findings_stay_rare(evaluation) -> None:
+    """Layer 2 may be wrong occasionally; it may not be wrong often."""
+    raised = sum(row.hits for row in evaluation.codes)
+    assert evaluation.unlabelled_hits / raised <= 0.02
+
+
 def test_pending_codes_are_reported_not_hidden(evaluation) -> None:
-    """All 34 codes appear; the seventeen without a detector say which phase owns them."""
+    """All 34 codes appear; those without a detector say which phase owns them."""
     assert len(evaluation.codes) == 34
     pending = {row.code for row in evaluation.pending}
-    assert len(pending) == 17
+    assert pending == {"C01", "C02", "C03", "C05", "C06"}
     for row in evaluation.pending:
         assert "phase" in row.detector, row.code
 

@@ -3,17 +3,22 @@
 The AI service: features, four detection layers, fusion, evidence, eval harness.
 Build spec: `docs/specs/detector.md`. Phases 3-7 and 12.
 
-## Built so far (phase 3)
+## Built so far (phases 3-4)
 
-The DuckDB feature build, the layer-1 declarative rule engine, and the evaluation harness.
-Layers 2-4 arrive in phases 4-6; asking for those stages fails loudly rather than silently
+The DuckDB feature build, the layer-1 declarative rule engine, layer 2 (peer cohorts, the
+expected-salary model and its SAR attribution, change-points), and the evaluation harness.
+Layers 3-4 arrive in phases 5-6; asking for those stages fails loudly rather than silently
 skipping.
 
 ```
-python tasks.py detect --scale 10k --run-id 2026-08     # features -> L1
+python tasks.py detect --scale 10k --run-id 2026-08     # features -> L1 -> L2
 python tasks.py eval   --scale 10k                      # writes docs/EVAL_REPORT.md
-python tasks.py verify 3                                # the phase gate
+python tasks.py verify 4                                # the phase gate
 ```
+
+Twenty-nine of the thirty-four codes have a detector: seventeen declarative rules in
+`policy/rules/*.yaml`, twelve peer statistics configured in `policy/peer_stats.yaml`. Both
+layers emit the same finding shape, so phase 6 fuses one list rather than two.
 
 `tasks.py` is a thin wrapper over `python -m detector`, which is the real CLI
 (`build-features`, `run`, `score`, `eval`, `rules`). Like the generator, this package is not

@@ -761,6 +761,208 @@ def verify_3() -> int:
     return gate.report()
 
 
+# Words a reviewer would have to be a data scientist to read. The evidence
+# bundle and every description in it are user-facing (CLAUDE.md), so layer 2 is
+# gated on the same standard as the UI: business terms and SAR amounts.
+ML_JARGON = (
+    "z-score", "z score", "robust z", "standard deviation", "sigma",
+    "isolation forest", "autoencoder", "reconstruction", "residual", "shap",
+    "percentile", "outlier", "regression", "cusum", "anomaly score", "quantile",
+)
+
+
+def _jargon(text: str) -> list[str]:
+    lowered = text.lower()
+    return [word for word in ML_JARGON if word in lowered]
+
+
+def verify_4() -> int:
+    """Phase-4 gate: layer 2 peer statistics, the expected-salary model, SHAP.
+
+    The spec's claim for this phase is narrow: family B recall at or above 85%,
+    and every cohort either reaches `min_size` or falls back for a reason the
+    evidence records.  Everything else here exists to stop that claim being true
+    by accident -- that the ladder is not quietly comparing people against four
+    peers, that the SAR attribution adds up, that the planted confounders are
+    still not flagged, that layer 1 has not regressed, and that nothing layer 2
+    writes needs a data scientist to read.
+    """
+    _add_service_paths()
+    from detector.config import DetectorConfig, LakeError
+    from detector.eval import harness, report
+    from detector.features.build import build
+    from detector.lake import connect
+    from detector.layers.l1_rules import RuleSet, run_rules
+    from detector.layers.l2_peer import DETECTORS, L2Error, run_peer
+    from detector.layers.l2_salary import additive_gap
+    from detector.policy import DetectorPolicy
+    from detector.run import rule_digest
+
+    gate = Gate(4, PHASE_TITLES[4])
+    policy = DetectorPolicy.load(ROOT / "policy")
+
+    try:
+        cfg = DetectorConfig.build(
+            "10k", run_id="verify-4",
+            lake=ROOT / "data" / "raw",
+            features=ROOT / "data" / "features",
+            runs=ROOT / "data" / "runs",
+        )
+    except LakeError as exc:
+        gate.check("lake present", False, str(exc)[:90])
+        return gate.report()
+
+    # ----------------------------------------------------------- the pack
+    expected_codes = {"B01", "B02", "B03", "B04", "B05", "B06", "B07",
+                      "D01", "D02", "D05", "D06", "D07"}
+    configured = set(policy.peer_codes)
+    gate.check("peer detectors present",
+               configured == expected_codes == set(DETECTORS),
+               f"{len(configured)} codes, every code the catalogue marks L2"
+               if configured == expected_codes
+               else f"missing={sorted(expected_codes - configured)}")
+    disabled = sorted(c for c, v in policy.peer_codes.items()
+                      if not v.get("enabled", True))
+    gate.check("every detector enabled", not disabled,
+               "a disabled detector is a silent 0% recall row"
+               if not disabled else f"disabled={disabled}")
+
+    # ------------------------------------------------------------- layers
+    build(cfg, policy)
+    ruleset = RuleSet.load(ROOT / "policy")
+    con = connect(cfg, features=True)
+    try:
+        l1 = run_rules(con, ruleset)
+        try:
+            l2 = run_peer(con, policy)
+            again = run_peer(con, policy)
+            l2_error = ""
+        except L2Error as exc:
+            l2, again, l2_error = None, None, str(exc)[:90]
+    finally:
+        con.close()
+    if l2 is None or again is None:
+        gate.check("layer 2 runs", False, l2_error)
+        return gate.report()
+
+    cohorts = l2.cohorts
+    spread = ", ".join(f"L{lvl}={n:,}" for lvl, n in sorted(cohorts.by_level.items()))
+    gate.check("cohort ladder resolves",
+               sum(cohorts.by_level.values()) == cfg.employees, spread)
+    # The gate the spec names: n >= 30, or a fallback the evidence records. An
+    # employee still short of min_size on the LAST rung has nowhere further to
+    # fall, and their cohort is context in the bundle rather than a trigger.
+    last_rung = cohorts.by_level.get(len(cohorts.levels), 0)
+    gate.check("cohorts reach n >= 30", cohorts.below_min <= last_rung,
+               f"{cfg.employees - cohorts.below_min:,}/{cfg.employees:,} at "
+               f"n>={cohorts.min_size}; {cohorts.below_min} short on the last "
+               "rung, recorded in the evidence and never a trigger")
+    gate.check("cohort design holds", cohorts.last_rung_share < 0.30,
+               f"{cohorts.last_rung_share * 100:.0f}% fall all the way to "
+               f"{cohorts.levels[-1]} alone, against a 30% ceiling -- above it "
+               "the ladder is wrong, not the detector")
+
+    salary = l2.salary
+    gate.check("expected salary model fitted", salary is not None and salary.trained,
+               f"{salary.rows:,} employees, {len(salary.drivers)} legitimate "
+               f"drivers, median gap SAR {salary.median_abs_residual:,.0f}"
+               if salary else "not fitted")
+    gap = additive_gap(salary)
+    gate.check("attributions add up", gap <= 1.0,
+               f"{salary.method}: expected pay = baseline + every driver's "
+               f"share, to within SAR {gap:.2f}")
+
+    gate.check("layer 2 under 120s", l2.seconds < 120,
+               f"{l2.total} findings in {l2.seconds:.2f}s")
+    gate.check("layer 2 is deterministic",
+               again.by_code == l2.by_code
+               and [h["description"] for h in again.hits]
+                   == [h["description"] for h in l2.hits],
+               "a second pass finds the same cases with the same wording")
+
+    # ---------------------------------------------------------------- eval
+    scored = harness.evaluate(
+        cfg, ruleset, l1, l2,
+        runtime={"l1": l1.seconds, "l2": l2.seconds},
+        policy_digest=policy.digest,
+        rule_digest=rule_digest(ruleset),
+    )
+    path = report.write(scored, ROOT / report.REPORT_PATH)
+    by_code = {row.code: row for row in scored.codes}
+
+    for code in sorted(expected_codes):
+        row = by_code.get(code)
+        gate.check(
+            f"{code} l2 peer",
+            bool(row) and row.recall == 1.0 and (row.precision or 0) >= 0.75,
+            f"{row.injected} injected, {row.detected} found, {row.hits} raised, "
+            f"{_rate(row.precision)} precision, {_rate(row.window_rate)} window"
+            if row else "no eval row",
+        )
+
+    recall_b = scored.family_recall("B")
+    gate.check("family B recall >= 85%", (recall_b or 0) >= 0.85,
+               f"{_rate(recall_b)} across 7 codes -- the phase-4 gate")
+    gate.check("family B precision", (scored.family_precision("B") or 0) >= 0.85,
+               f"{_rate(scored.family_precision('B'))} -- a statistic is not a "
+               "fact, so this is a floor, not the 100% layer 1 owes")
+    d_codes = [by_code[c] for c in ("D01", "D02", "D05", "D06", "D07") if c in by_code]
+    d_recall = (sum(c.detected for c in d_codes) / sum(c.injected for c in d_codes)
+                if d_codes else None)
+    gate.check("layer-2 family D recall", (d_recall or 0) >= 0.85,
+               f"{_rate(d_recall)} across the 5 family-D codes layer 2 owns")
+
+    # -------------------------------------------------------- the evidence
+    bundles = [json.loads(h["evidence_json"]) for h in l2.hits]
+    peer_findings = [b for b in bundles if b.get("peer_context")]
+    complete = [b for b in peer_findings
+                if b["peer_context"].get("cohort_key")
+                and b["peer_context"].get("cohort_n")]
+    gate.check("peer evidence names its cohort",
+               bool(peer_findings) and len(complete) == len(peer_findings),
+               f"{len(complete)}/{len(peer_findings)} peer findings carry the "
+               "cohort key and its size -- a comparison whose basis the reviewer "
+               "cannot see is not evidence")
+    attributed = [b for b in bundles if b.get("feature_attributions")]
+    gate.check("salary findings carry SAR attribution", bool(attributed),
+               f"{len(attributed)} findings split the gap driver by driver, in riyals")
+
+    jargon = sorted({
+        word
+        for h in l2.hits
+        for text in [h["description"], *h["recommended_actions"]]
+        for word in _jargon(text)
+    })
+    gate.check("no ML jargon reaches the reviewer", not jargon,
+               f"{len(l2.hits)} descriptions and their actions, against "
+               f"{len(ML_JARGON)} banned terms"
+               if not jargon else f"found={jargon}")
+
+    critical = [c for c in scored.confounders if c.flagged_critical]
+    own_code = [c for c in scored.confounders if c.flagged_by_its_code]
+    gate.check("confounders not flagged", not critical and not own_code,
+               f"{len(scored.confounders)} types, "
+               f"{sum(c.planted for c in scored.confounders)} employees, none "
+               "flagged by the code they exist to test"
+               if not critical and not own_code
+               else f"critical={[c.confounder_type for c in critical]}, "
+                    f"own_code={[c.confounder_type for c in own_code]}")
+
+    gate.check("layer 1 has not regressed",
+               scored.family_recall("A") == 1.0
+               and scored.family_precision("A") == 1.0,
+               f"family A still {_rate(scored.family_recall('A'))} recall and "
+               f"{_rate(scored.family_precision('A'))} precision over "
+               f"{l1.total} findings")
+    gate.check("no zero-recall detector", not scored.zero_recall,
+               f"{len(scored.implemented)}/34 codes have a detector, "
+               f"{len(scored.pending)} owned by phases 5-6")
+    gate.check("eval report written", path.exists(),
+               f"{report.REPORT_PATH}, 34 code rows")
+
+    return gate.report()
+
+
 def _rate(value: float | None) -> str:
     return "--" if value is None else f"{value * 100:.0f}%"
 
@@ -783,6 +985,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return verify_2()
     if phase == 3:
         return verify_3()
+    if phase == 4:
+        return verify_4()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)
@@ -871,7 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
     p.add_argument("--run-id", default=None)
     p.add_argument("--stages", default=None,
-                   help="comma-separated subset of features,l1")
+                   help="comma-separated subset of features,l1,l2")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_detect)
 

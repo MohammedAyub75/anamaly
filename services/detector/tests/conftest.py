@@ -23,6 +23,7 @@ from detector.eval import harness
 from detector.features.build import build, feature_columns
 from detector.lake import connect, connect_labels
 from detector.layers.l1_rules import RuleSet, run_rules
+from detector.layers.l2_peer import run_peer
 from detector.policy import DetectorPolicy
 
 SCALE = "10k"
@@ -89,5 +90,11 @@ def l1(con, ruleset: RuleSet):
 
 
 @pytest.fixture(scope="session")
-def evaluation(cfg: DetectorConfig, ruleset: RuleSet, l1, policy: DetectorPolicy):
-    return harness.evaluate(cfg, ruleset, l1, policy_digest=policy.digest)
+def l2(con, policy: DetectorPolicy):
+    """One layer-2 pass: cohorts, the salary model and the twelve detectors."""
+    return run_peer(con, policy)
+
+
+@pytest.fixture(scope="session")
+def evaluation(cfg: DetectorConfig, ruleset: RuleSet, l1, l2, policy: DetectorPolicy):
+    return harness.evaluate(cfg, ruleset, l1, l2, policy_digest=policy.digest)

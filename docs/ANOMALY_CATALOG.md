@@ -151,8 +151,12 @@ Phase-4 gate: **recall ≥ 85%**.
 ### B01 — Base salary above the peer P99
 **Severity** HIGH · **Rate** 0.14% · **Detector** L2
 - **Injection**: raise `base_salary` to 1.35×–1.8× the cohort median, keeping it plausible.
-- **Detection**: robust z ≥ 3.5 **and** percentile ≥ 99, corroborated by the expected-salary model's
-  residual (HistGradientBoostingRegressor + TreeSHAP).
+- **Detection**: two routes in, either sufficient. Above the top of the approved band by more than
+  `band_policy.overpayment_tolerance_pct` — a fact about the band, and what the injector actually
+  does — **or** robust z ≥ 3.5 *and* percentile ≥ 99 within a cohort of at least `min_size`, *and*
+  a gap the expected-salary model (HistGradientBoostingRegressor + TreeSHAP) cannot account for.
+  The residual corroboration is what leaves `legit_high_earner` alone: a senior specialist is
+  predicted to be at the top of their cohort by grade, service and site.
 - **Evidence**: cohort key and size, employee value, cohort median, percentile, SHAP attribution in
   SAR ("grade explains +2,100, site +900, unexplained +9,800").
 - **Actions**: confirm against the approved band; review the last salary action's authorisation.
@@ -176,7 +180,13 @@ Phase-4 gate: **recall ≥ 85%**.
   ceiling rather than the 0.7–0.9 first written here because phase 1 clamps the clean population at
   `clean_population_ratio_max` (0.88): an injection inside 0.7–0.9 would sit inside the clean
   distribution and be indistinguishable from an ordinary offshore rotation worker.
-- **Detection**: robust z on `allowance_ratio` within cohort; ceiling from `allowance_load`.
+- **Detection**: the ceiling in `allowance_load.hard_ceiling_ratio` is the trigger and the cohort
+  comparison is the context, which is the reverse of how this line first read. The injection note
+  above says why: `legit_rotation_stack` sits at ~0.60 by design, and a robust z within cohort
+  flags that confounder as readily as the anomaly, because a ratio inside the clean distribution is
+  genuinely indistinguishable from a legitimate stack. The breach must also still be live in the
+  employee's most recent paid month — a stack that crossed the line for three months and came back
+  under it on its own is what a posting change looks like, not a case to work.
 - **Evidence**: ratio, cohort median ratio, the contributing allowance breakdown.
 - **Actions**: review each allowance's eligibility individually — the total is the symptom.
 
@@ -201,7 +211,11 @@ Phase-4 gate: **recall ≥ 85%**.
 ### B06 — Bonus inconsistent with performance history
 **Severity** MEDIUM · **Rate** 0.08% · **Detector** L2
 - **Injection**: pay a top-decile bonus to employees with ratings of 1–2 across three years.
-- **Detection**: bonus percentile vs rating; residual from a bonus ~ rating + grade model.
+- **Detection**: the bonus schedule in `policy/payroll.yaml` is monotone in the rating, so the
+  entitlement is computable and the finding is the gap against it: paid more than `excess_ratio`
+  times what the rating entitles, or — where the rating entitles nothing — more than
+  `min_pct_of_base_when_unentitled` of base pay. No rating on record is a gap in the performance
+  file rather than a bonus the record contradicts, and is not this finding.
 - **Evidence**: three-year ratings, bonus amount, cohort bonus median for that rating.
 - **Actions**: confirm the bonus approval; review the rating record for tampering.
 
@@ -301,7 +315,10 @@ workhorse; the sequence autoencoder is only built if CUSUM proves insufficient (
 ### D01 — Promotion velocity outlier
 **Severity** MEDIUM · **Rate** 0.07% · **Detector** L2
 - **Injection**: 3+ grade increases within 24 months.
-- **Detection**: grade delta over a rolling 24 months > `max_grade_jump_per_24m`.
+- **Detection**: grade delta over a rolling 24 months > `max_grade_jump_per_24m`. The finding is
+  dated over the months the employee is on payroll, not over the promotions: a career that climbed
+  four grades before the observation window opened is still a grade held today that policy does not
+  support, and the reviewer works it now. The promotion dates stay in the evidence.
 - **Evidence**: the grade timeline, each promotion's date and approver, peer promotion rate.
 - **Actions**: review each promotion's approval; check the approver for a pattern.
 
@@ -354,7 +371,11 @@ workhorse; the sequence autoencoder is only built if CUSUM proves insufficient (
   `ON_CALL`, `SAFETY`, `SECURITY_CLEARANCE` and the rest of `unowned_allowance_codes` in
   `policy/injection.yaml`), each paid at exactly its policy amount. Money appearing with nothing in
   the record to account for it is the finding; paid as `REMOTE_SITE` it would be A01 instead.
-- **Detection**: CUSUM over the employee's own 24-month series; robust z against their own history.
+- **Detection**: a step, then CUSUM. The step locates the month — a single month where standing pay
+  rises past `step_ratio` — and CUSUM, accumulating against the employee's own pre-step baseline,
+  decides whether it was a change or a blip. CUSUM alone over the whole series finds the drift but
+  dates it badly: it alarms some months late and its reset point wanders, and a change-point a
+  reviewer cannot line up against a payroll instruction is not evidence.
   Measured on the **standing** part of pay — base plus allowances, less GOSI and loan — and only
   where **base pay itself did not move**: overtime, the bonus month and a retro correction are
   variation a reviewer can already account for, and a salary that moved with no paperwork behind it
@@ -372,8 +393,11 @@ rate suggests) · **Detector** L2 aggregate
   detector would put in the comparison — paid in both the baseline and the recent window — is
   lifted and labelled, because a member left out would be flagged by the section's drift with
   nothing of their own to explain it.
-- **Detection**: aggregate robust z at `org_unit_id` level against sibling units at the same level,
-  and against the unit's own earlier baseline over the employees present in both windows.
+- **Detection**: three conditions, all required. Aggregate robust z at `org_unit_id` level against
+  sibling units at the same level; the unit's own earlier baseline over the employees present in
+  both windows; and **a majority of members who each moved**. The third is what makes it a section
+  finding: one manager with a large legitimate increase drags a unit average exactly as far as a
+  scheme does, and only the member count tells the two apart.
 - **Evidence**: the section, its members, the org-level comparison, the timeline of the drift.
 - **Actions**: audit the section as a unit, not employee by employee; review the section head.
 

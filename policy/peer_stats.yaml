@@ -1,0 +1,382 @@
+# ---------------------------------------------------------------------------
+# policy/peer_stats.yaml — layer 2, the peer-statistics detectors
+#
+# Read by `services/detector/detector/layers/l2_peer.py` (phase 4). Layer 1 has
+# one YAML file per rule because a rule IS a single SQL predicate; a peer
+# statistic is not — it needs a cohort, a robust centre and a spread, or a
+# model residual, or a change-point over 24 months. So the *computation* lives
+# in Python and everything a customer would want to turn lives here: the
+# thresholds, the severities, the wording a reviewer reads, and what to do.
+#
+# Numbers that already exist in another pack are NOT repeated here. Two copies
+# of one threshold is how an injector and a detector drift apart:
+#
+#   band_policy.overpayment_tolerance_pct        -> B01   (grade_bands.yaml)
+#   band_policy.underpayment_tolerance_pct       -> B02   (grade_bands.yaml)
+#   allowance_load.hard_ceiling_ratio            -> B03   (allowance_rules.yaml)
+#   payroll.overtime.legal_monthly_max_hours     -> B05   (payroll.yaml)
+#   payroll.bonus.pct_of_base_by_rating          -> B06   (payroll.yaml)
+#   band_policy.max_increments_per_12m           -> B07   (grade_bands.yaml)
+#   band_policy.max_grade_jump_per_24m           -> D01   (grade_bands.yaml)
+#   payroll.retro_adjustment.max_per_employee_clean -> D02 (payroll.yaml)
+#   fusion.peer_cohort.{min_size, robust_z_threshold, percentile_flag_*}
+#
+# Contracts: docs/ANOMALY_CATALOG.md (what each code means),
+#            docs/EVIDENCE_CONTRACT.md (peer_context, feature_attributions).
+# ---------------------------------------------------------------------------
+version: 1
+
+# ---------------------------------------------------------------------------
+# Robust statistics. Median and MAD, never mean and sigma: outliers are what we
+# are looking for and they poison the mean.
+# ---------------------------------------------------------------------------
+robust:
+  # robust_z = scale_factor * (x - median) / MAD. 0.6745 puts MAD on the same
+  # footing as a standard deviation for normally distributed data.
+  scale_factor: 0.6745
+  # The MAD = 0 guard. A cohort where more than half the members sit on the
+  # same value has MAD 0 and every other member would score infinity, so the
+  # spread is floored at this share of the median before dividing.
+  mad_floor_ratio: 0.02
+  # A cohort below this never produces a robust z at all: with n this small the
+  # median is not a norm, it is an anecdote. The ladder in fusion.yaml walks
+  # down to min_size (30) first; this is the floor under the last rung.
+  min_cohort_for_z: 8
+  # Metrics the cohort ladder is precomputed over (features/sql/06_*.sql).
+  metrics: [base_salary, allowance_ratio, allowance_total_monthly, net_mean,
+            overtime_ratio, band_position]
+
+# ---------------------------------------------------------------------------
+# The expected-salary model. Predicts base salary from LEGITIMATE drivers only;
+# the residual is the anomaly signal, and TreeSHAP over the model turns it into
+# a sentence a reviewer can take to a manager: "expected 18,400, actual 31,200;
+# grade explains +2,100, site +900, unexplained +9,800".
+#
+# Never trained on labels_anomaly. This is an unsupervised residual, not a
+# classifier (docs/specs/detector.md, layer 2).
+# ---------------------------------------------------------------------------
+expected_salary:
+  target: base_salary
+  drivers:
+    - grade
+    - job_family
+    - service_years
+    - education_rank
+    - performance_rating_mean
+    - site_class
+    - nationality_class
+  # HistGradientBoostingRegressor. Fixed seed: two runs over one lake must
+  # produce the same expected salary, or the same alert changes wording.
+  random_state: 42
+  max_iter: 300
+  learning_rate: 0.08
+  max_depth: 6
+  min_samples_leaf: 40
+  l2_regularization: 1.0
+  early_stopping: false
+  # Attributions below this share of the prediction are noise on a payslip and
+  # are folded into "everything else" rather than shown.
+  attribution_min_sar: 100
+  attribution_top_n: 5
+  # The residual is corroboration, not the trigger: a finding says "unexplained"
+  # only when the model cannot account for this much of the gap.
+  residual_min_sar: 1000
+
+# ---------------------------------------------------------------------------
+# Change-point detection over an employee's own 24-month series (D05, D06, D07).
+#
+# CUSUM in its drawup form: P(i) = sum of (x - baseline - k*spread) up to i, and
+# S(i) = P(i) - min P(j<=i). That is the textbook reset-at-zero CUSUM written so
+# it is two window functions instead of a Python loop over 24M rows.
+# ---------------------------------------------------------------------------
+cusum:
+  k_sigma: 0.5              # slack: drift smaller than this is not accumulated
+  h_sigma: 4.0              # alarm threshold, in spreads
+  min_months_each_side: 2   # a step in the last month is not yet a step
+  spread_floor_ratio: 0.01  # guard for a perfectly flat series
+
+# ---------------------------------------------------------------------------
+# The twelve codes layer 2 owns. `docs/ANOMALY_CATALOG.md` is authoritative for
+# what each one MEANS; this file carries the dials and the wording.
+#
+# Every description is written for a non-technical reviewer: SAR amounts and
+# months, no z-scores, no residuals, no model names (CLAUDE.md).
+# ---------------------------------------------------------------------------
+codes:
+
+  B01:
+    name_en: Base salary above the peer group and above the band ceiling
+    name_ar: "راتب أساسي يفوق نطاق الدرجة ومجموعة الأقران"
+    severity: HIGH
+    regulatory_reference: "HR-COMP-002 Salary Administration s.4"
+    enabled: true
+    metric: base_salary
+    impact_confidence: estimated
+    thresholds:
+      # A peer outlier is flagged when it is BOTH an outlier by spread and at
+      # the top of the cohort; either alone is a normal senior specialist.
+      require_percentile: true
+    description: >
+      Base salary is SAR {value:,.0f} a month against SAR {cohort_median:,.0f}
+      for the {cohort_n:,} comparable employees ({cohort_label}), and SAR
+      {band_salary_max:,.0f} at the top of the approved band for grade {grade}.
+      Grade, site, length of service and performance together support SAR
+      {expected_salary:,.0f} a month ({attribution_text}), leaving SAR
+      {unexplained_sar:,.0f} a month unaccounted for.
+    recommended_actions:
+      - "Confirm the salary against the approved band for grade {grade}"
+      - "Review the authorisation on the most recent salary action"
+      - "Recover or regularise the SAR {monthly_impact:,.0f} a month paid above the ceiling"
+
+  B02:
+    name_en: Base salary below the band minimum
+    name_ar: "راتب أساسي أقل من الحد الأدنى للنطاق"
+    severity: MEDIUM
+    regulatory_reference: "HR-COMP-002 Salary Administration s.2"
+    enabled: true
+    metric: base_salary
+    impact_confidence: exact
+    thresholds: {}
+    # Under-payment is a real finding, not just a fraud signal — it is a legal
+    # exposure, and the money runs the other way.
+    description: >
+      Base salary is SAR {value:,.0f} a month against a minimum of SAR
+      {band_salary_min:,.0f} for grade {grade}, a shortfall of SAR
+      {monthly_impact:,.0f} a month. Over {months_paid} months from
+      {first_period_label} the employee has been underpaid SAR
+      {cumulative_impact:,.0f}.
+    recommended_actions:
+      - "Raise a pay-correction case to bring the salary to at least SAR {band_salary_min:,.0f}"
+      - "Calculate the back-pay owed for the {months_paid} months affected"
+      - "Check whether other employees in grade {grade} are affected the same way"
+
+  B03:
+    name_en: Total allowances far above the peer group
+    name_ar: "إجمالي البدلات يفوق مجموعة الأقران بكثير"
+    severity: MEDIUM
+    regulatory_reference: "HR-COMP-020 Allowance Load s.1"
+    enabled: true
+    metric: allowance_ratio
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      Allowances total SAR {allowance_total:,.0f} a month, which is
+      {value_pct:.0f}% of base pay, against {median_pct:.0f}% for the
+      {cohort_n:,} comparable employees ({cohort_label}) and a policy ceiling of
+      {ceiling_pct:.0f}%. {allowance_paid_count} separate allowances are being
+      paid: {allowance_breakdown}.
+    recommended_actions:
+      - "Review each of the {allowance_paid_count} allowances against its own eligibility clause"
+      - "Confirm the housing, transport and family entitlements against the current record"
+      - "Recover the SAR {monthly_impact:,.0f} a month paid above the ceiling if the stack is not supported"
+
+  B04:
+    name_en: Salary increase with no supporting assignment record
+    name_ar: "زيادة في الراتب دون سجل تعيين مؤيد"
+    severity: CRITICAL
+    regulatory_reference: "HR-COMP-002 Salary Administration s.7"
+    enabled: true
+    metric: base_salary
+    impact_confidence: estimated
+    thresholds:
+      # A month-over-month rise this large is a salary action, not a step.
+      jump_pct: 8.0
+      # Payroll and the assignment record can be a cycle apart; a record either
+      # side of the month the money moved counts as supporting it.
+      assignment_window_months: 1
+    description: >
+      Base pay rose from SAR {previous_base:,.0f} to SAR {new_base:,.0f} a month
+      ({jump_pct:.0f}%) in {first_period_label}, and there is no promotion,
+      transfer or increment record within a month either side to authorise it.
+      The higher amount has been paid for {months_paid} months since.
+    recommended_actions:
+      - "Escalate to investigation — money moved with no paperwork behind it"
+      - "Obtain the document authorising the increase of SAR {monthly_impact:,.0f} a month"
+      - "Freeze further increments for this employee pending the review"
+
+  B05:
+    name_en: Overtime beyond the legal maximum or above base pay
+    name_ar: "عمل إضافي يتجاوز الحد النظامي أو يفوق الراتب الأساسي"
+    severity: HIGH
+    regulatory_reference: "Labour Law art.107 / HR-TIME-003 Overtime s.1"
+    enabled: true
+    metric: overtime_ratio
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      {overtime_hours:.0f} overtime hours were claimed in {first_period_label}
+      against a legal maximum of {legal_max_hours:.0f}, paid as SAR
+      {overtime_pay:,.0f} beside base pay of SAR {base_pay:,.0f}. The pattern
+      runs for {months_paid} month(s).
+    recommended_actions:
+      - "Verify the timesheets for {first_period_label} with the supervisor"
+      - "Cross-check the attendance record for duplicate or overlapping claims"
+      - "Recover the SAR {monthly_impact:,.0f} claimed beyond the legal maximum if unsupported"
+
+  B06:
+    name_en: Bonus inconsistent with the performance record
+    name_ar: "مكافأة لا تتفق مع سجل الأداء"
+    severity: MEDIUM
+    regulatory_reference: "HR-COMP-030 Variable Pay s.3"
+    enabled: true
+    metric: base_salary
+    impact_confidence: exact
+    thresholds:
+      # The bonus schedule in payroll.yaml is monotone in the rating; clean
+      # payroll noise stays inside this multiple of the entitlement.
+      excess_ratio: 1.60
+      # A rating that entitles the employee to nothing makes any ratio
+      # infinite, so an absolute floor decides what is worth a reviewer's time.
+      min_pct_of_base_when_unentitled: 0.05
+    description: >
+      A bonus of SAR {bonus:,.0f} was paid in {first_period_label} against SAR
+      {entitled_bonus:,.0f} for a performance rating of {rating}. The employee
+      has been rated {rating_history} over the last three years.
+    recommended_actions:
+      - "Confirm who approved the bonus of SAR {bonus:,.0f}"
+      - "Review the performance record for {rating_history} against the rating evidence"
+      - "Recover the SAR {monthly_impact:,.0f} paid above the entitlement if the rating stands"
+
+  B07:
+    name_en: More salary increments in twelve months than policy allows
+    name_ar: "علاوات أكثر مما تسمح به السياسة خلال اثني عشر شهرًا"
+    severity: MEDIUM
+    regulatory_reference: "HR-COMP-005 Increment Policy s.1"
+    enabled: true
+    metric: base_salary
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      {increment_count} increments were awarded in the twelve months to
+      {last_period_label}, against a maximum of {max_increments} a year. Base
+      pay rose from SAR {previous_base:,.0f} to SAR {new_base:,.0f} a month
+      across them.
+    recommended_actions:
+      - "Review the approval on each of the {increment_count} increments"
+      - "Check whether one approver recurs across them"
+      - "Regularise the SAR {monthly_impact:,.0f} a month awarded outside policy"
+
+  D01:
+    name_en: Promotion velocity far above policy
+    name_ar: "سرعة ترقية تفوق السياسة"
+    severity: MEDIUM
+    regulatory_reference: "HR-ORG-010 Promotion Policy s.3"
+    enabled: true
+    metric: base_salary
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      The employee moved from grade {previous_grade} to grade {new_grade} in
+      {window_months} months — {grade_delta} grades against a maximum of
+      {max_grade_jump} in twenty-four. Base pay rose from SAR
+      {previous_base:,.0f} to SAR {new_base:,.0f} a month across the moves.
+    recommended_actions:
+      - "Review the approval on each of the {promotion_count} promotions"
+      - "Check the approver for the same pattern on other employees"
+      - "Confirm the employee met the minimum time in grade for each move"
+
+  D02:
+    name_en: Repeated retroactive adjustments
+    name_ar: "تسويات بأثر رجعي متكررة"
+    severity: HIGH
+    regulatory_reference: "HR-PAY-014 Retroactive Adjustments s.2"
+    enabled: true
+    metric: net_mean
+    impact_confidence: exact
+    thresholds: {}
+    description: >
+      {entry_count} retroactive payments totalling SAR {cumulative_impact:,.0f}
+      were made between {first_period_label} and {last_period_label}, against a
+      normal pattern of at most {max_entries} in the whole period. The largest
+      was SAR {largest_entry:,.0f} in {largest_period_label}.
+    recommended_actions:
+      - "Obtain the written justification for each of the {entry_count} adjustments"
+      - "Confirm whether any correspond to a documented payroll error"
+      - "Review the approver — repeated retroactive payments are the classic slow leak"
+
+  D05:
+    name_en: Allowances added shortly after a change of manager
+    name_ar: "بدلات أُضيفت بعد تغيير المدير مباشرة"
+    severity: HIGH
+    regulatory_reference: "HR-COMP-020 Allowance Load s.4"
+    enabled: true
+    metric: allowance_total_monthly
+    impact_confidence: estimated
+    thresholds:
+      # The clearance the injectors respect (injection.yaml guards) is the same
+      # window the detector looks in: an allowance added this soon after a
+      # handover is attributable to the handover.
+      manager_change_window_months: 2
+      # A step worth less than this share of base is ordinary movement.
+      step_pct_of_base: 20.0
+    description: >
+      The employee moved from manager {previous_manager} to manager
+      {new_manager} in {manager_change_label} with no change of grade, and SAR
+      {step_amount:,.0f} a month of new allowances began in
+      {first_period_label} — {step_pct:.0f}% of base pay. Allowances now added:
+      {added_allowances}.
+    recommended_actions:
+      - "Review the other reports of manager {new_manager} for the same pattern"
+      - "Confirm the eligibility of each allowance added: {added_allowances}"
+      - "Escalate as a possible collusion precursor if more than one report is affected"
+
+  D06:
+    name_en: Unexplained sustained rise in take-home pay
+    name_ar: "ارتفاع مستمر غير مبرر في صافي الراتب"
+    severity: MEDIUM
+    regulatory_reference: "HR-PAY-001 Payroll Instruction Control s.1"
+    enabled: true
+    metric: net_mean
+    impact_confidence: estimated
+    thresholds:
+      # injection.yaml's guard keeps an entitlement violation's step at or
+      # below 20% of standing pay, so anything above this is a step that no
+      # family-A finding already explains.
+      step_ratio: 0.25
+    description: >
+      Standing pay — base plus allowances, before overtime and bonus — rose from
+      SAR {before_mean:,.0f} to SAR {after_mean:,.0f} a month in
+      {first_period_label} and has stayed there for {months_paid} months. Base
+      pay did not change and there is no assignment record for the period.
+      Added: {added_allowances}.
+    recommended_actions:
+      - "Reconcile the payroll instructions for {first_period_label}"
+      - "Confirm the eligibility of the allowances added: {added_allowances}"
+      - "Recover the SAR {monthly_impact:,.0f} a month if no instruction supports it"
+
+  D07:
+    name_en: Whole section drifting upward together
+    name_ar: "انحراف جماعي في قسم بأكمله"
+    severity: HIGH
+    regulatory_reference: "HR-COMP-020 Allowance Load s.6"
+    enabled: true
+    metric: allowance_total_monthly
+    impact_confidence: estimated
+    thresholds:
+      # The drift is measured over this many recent months against everything
+      # before them, over the employees paid in both windows.
+      window_months: 6
+      # A unit whose allowance bill per head grew by more than this against its
+      # own baseline is drifting; sibling units at the same level are the
+      # control group.
+      drift_ratio: 1.25
+      # Below this, a "section" is a handful of people and one promotion moves
+      # the average.
+      min_members: 5
+      # A section moving TOGETHER is the finding. One manager with a large
+      # legitimate increase drags a unit average as far as a scheme does, and
+      # the two are told apart by how many members moved: a member counts as
+      # moving when their own allowances rose by this much, and this share of
+      # the section has to have moved before it is a section-level finding.
+      member_drift_ratio: 1.20
+      member_share: 0.60
+    description: >
+      Allowances across {org_unit_name_en} rose {drift_pct:.0f}% per head in the
+      six months to {last_period_label} — from SAR {unit_before:,.0f} to SAR
+      {unit_after:,.0f} a month on average across {member_count} employees —
+      while comparable sections moved {sibling_pct:.0f}%. This employee's own
+      allowances rose SAR {monthly_impact:,.0f} a month.
+    recommended_actions:
+      - "Audit {org_unit_name_en} as a unit rather than employee by employee"
+      - "Review the section head and the approvals behind the {member_count} increases"
+      - "Compare against the sibling sections that did not move"

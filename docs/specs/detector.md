@@ -31,7 +31,8 @@ services/detector/
       sql/*.sql         # the feature queries, one file per feature block
     layers/
       l1_rules.py       # compiles policy/rules/*.yaml to DuckDB SQL
-      l2_peer.py        # cohorts, robust z, expected-salary model, CUSUM
+      l2_peer.py        # cohorts, robust z, the twelve L2 detectors, CUSUM
+      l2_salary.py      # expected-salary model + TreeSHAP attribution in SAR
       l3_ml.py          # isolation forest + tabular autoencoder
       l3_graph.py       # shared IBAN / duplicate ID / manager cycles
       l4_fusion.py      # scoring, severity, evidence bundle, financial impact
@@ -185,6 +186,65 @@ Never train on `labels_anomaly`. This is an unsupervised residual, not a classif
 
 **Temporal.** Rolling robust z plus CUSUM change-point detection over each employee's 24-month
 series, for D06 and to date the anomaly window on other codes.
+
+### What phase 4 actually wrote
+
+**Layer 2 owns twelve codes** — B01–B07 plus D01, D02, D05, D06, D07, which is every code
+`docs/ANOMALY_CATALOG.md` marks `L2`. They are configured in **`policy/peer_stats.yaml`**, a new
+pack: thresholds, severities, the description a reviewer reads and the actions to take. Layer 1 has
+one YAML file per rule because a rule *is* a single SQL predicate; a peer statistic needs a cohort,
+a robust centre and a spread, or a model residual, or a change-point over 24 months, so the
+computation is Python and only the dials are config. Numbers that already live in another pack —
+`band_policy`, `allowance_load`, `payroll.overtime`, `payroll.bonus`, `peer_cohort` — are read from
+there and never restated, because two copies of one threshold is how an injector and a detector
+drift apart.
+
+Layer 2's findings carry **the same shape as layer 1's**, written to
+`data/runs/run_id=<id>/l2_hits.parquet`, so phase 6 fuses one list rather than two. The
+`evidence_json` of a layer-2 finding is richer than a rule's flat map: `fields`, plus a
+`peer_context` block and a `feature_attributions` array in the shape
+`docs/EVIDENCE_CONTRACT.md` defines.
+
+**Cohort assignment** walks the ladder per (employee, metric) and takes the first rung reaching
+`min_size`; where no rung does, the **widest** rung wins, because a comparison against too few
+peers is worse than a broad one. Percentiles are computed over the true cohort at each rung, not
+over the employees assigned to it. Every assignment records the key, the level, the size and a
+`cohort_key_fallback_reason` in plain words, and the eval report prints the level distribution.
+
+**A cohort below `min_size` is context, never a trigger.** At grade 19 there are nineteen people in
+the company and the most senior of them is an outlier against the other eighteen by construction.
+
+**Layer 2 is not held to layer 1's precision.** A rule quotes a broken clause, so a false positive
+is a bug in the rule; a statistic says "this is unusual for somebody like them", which is a
+judgement. The gate asks for ≥ 75% per code and ≥ 85% per family, and tuning past that against the
+injected set would only mean fitting the detector to what we planted.
+
+Four detectors diverge from the catalogue's first statement of them, each documented in
+`docs/ANOMALY_CATALOG.md` in the same session:
+
+- **B03 is triggered by the load ceiling, with the cohort comparison as context** — the reverse of
+  "robust z within cohort". The catalogue's own note on the injection range says why: an offshore
+  rotation worker legitimately stacks six site-driven allowances at a ratio around 0.60, which is
+  what `legit_rotation_stack` is planted at, so a robust z alone flags the confounder as readily as
+  the anomaly. The breach must also still be live in the employee's most recent paid month.
+- **B01 has two routes in** — above the band ceiling (a fact about the approved band), or a robust-z
+  outlier at the top of a cohort of at least `min_size` **whose salary the expected-salary model
+  cannot account for**. The residual corroboration is what leaves `legit_high_earner` alone.
+- **D06 is a step, then CUSUM** — a single month where standing pay rises past `step_ratio` with
+  base pay flat and no assignment record either side, confirmed by CUSUM accumulating against the
+  employee's own pre-step baseline. CUSUM alone over the whole series finds the drift but dates it
+  badly, and a change-point a reviewer cannot line up against a payroll instruction is not evidence.
+- **D07 requires the section to move together** — unit drift against its own baseline *and* against
+  sibling units at the same level, *and* a majority of members who each moved. One manager with a
+  large legitimate increase drags a unit average as far as a scheme does; only the member count
+  tells them apart.
+
+**CUSUM is two window functions, not a loop.** The reset-at-zero form
+`S(i) = P(i) − min_{j≤i} P(j)`, with `P(i) = Σ (x − baseline − k·spread)`, is exactly the textbook
+statistic written so DuckDB can compute it set-based over 24M rows.
+
+**Runtime at 10k**: layer 2 in ~6.5s, of which ~4.7s is fitting the expected-salary model over
+10,000 employees. Every detector is a single DuckDB query.
 
 ## Layer 3 — unsupervised ML and graph (phase 5)
 

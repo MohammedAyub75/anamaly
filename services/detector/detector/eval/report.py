@@ -150,6 +150,45 @@ def render(report: EvalReport) -> str:
         add("**No confounder reached CRITICAL or HIGH.**")
     add("")
 
+    # ---------------------------------------------------------------- 2b
+    if report.cohorts is not None:
+        cohorts = report.cohorts
+        add("## 2b. What layer 2 compared against")
+        add("")
+        add(
+            "Every peer comparison names the cohort it was made against, and "
+            "the cohort is built by walking the fallback ladder in "
+            "`policy/fusion.yaml` until it reaches "
+            f"{cohorts.min_size} peers. **Heavy reliance on the last rung means "
+            "the cohort design is wrong**, not that the detector is: a "
+            "comparison against everyone at one grade is a weak comparison."
+        )
+        add("")
+        add("| Rung | Cohort key | Employees | Share |")
+        add("|---:|---|---:|---:|")
+        total = sum(cohorts.by_level.values()) or 1
+        for level, name in enumerate(cohorts.levels, start=1):
+            count = cohorts.by_level.get(level, 0)
+            add(f"| {level} | `{name}` | {count:,} | {count / total * 100:.1f}% |")
+        add("")
+        add(
+            f"{cohorts.below_min:,} employees "
+            f"({cohorts.below_min / total * 100:.1f}%) reach the last rung with "
+            f"fewer than {cohorts.min_size} peers -- for those the cohort is "
+            "reported as context in the evidence and is never the trigger."
+        )
+        add("")
+        if report.salary is not None:
+            salary = report.salary
+            add(
+                "The expected-salary model was fitted over "
+                f"{salary.rows:,} employees on "
+                f"{', '.join(salary.drivers)}; attribution method "
+                f"`{salary.method}`; median gap between actual and expected "
+                f"pay **SAR {_sar(salary.median_abs_residual)}** a month."
+            )
+            add("")
+
     # ---------------------------------------------------------------- 3
     add("## 3. Precision at depth")
     add("")
@@ -234,6 +273,8 @@ def summary_rows(report: EvalReport) -> list[tuple[str, str]]:
         ("codes with a detector", f"{len(report.implemented)}/{len(report.codes)}"),
         ("family A recall", _pct(report.family_recall("A"))),
         ("family A precision", _pct(report.family_precision("A"))),
+        ("family B recall", _pct(report.family_recall("B"))),
+        ("family B precision", _pct(report.family_precision("B"))),
         ("precision@100", _pct(report.precision_at.get(100))),
         ("findings raised", f"{sum(c.hits for c in report.codes):,}"),
         ("unaccounted findings", f"{report.unlabelled_hits:,}"),
