@@ -18,6 +18,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from detector.features.build import build as build_features
+from detector.features.build import stale_periods
 from detector.features.build import windows as build_windows
 from detector.lake import connect
 from detector.layers.l2_salary import fit as fit_salary
@@ -226,6 +227,57 @@ def test_writing_a_few_months_at_a_time_changes_nothing(cfg, policy: DetectorPol
         assert summary() == one_pass
     finally:
         build_features(cfg, policy, force=True)
+
+
+def test_a_changed_month_rebuilds_that_month_and_nothing_else(
+    cfg, policy: DetectorPolicy
+):
+    """A monthly run should cost a month.
+
+    The store is keyed per month on the raw partitions behind it, so a lake
+    that gained one month rebuilds one month -- the whole point of the phase-7
+    budget being about a production run rather than a first build. Everything
+    employee-grained still rebuilds, because the roll-ups, the graph features,
+    the statics and the cohorts each read the whole window.
+    """
+    def summary() -> tuple:
+        con = connect(cfg, features=True, policy=policy)
+        try:
+            return con.execute(
+                "SELECT count(*), sum(period_index), round(sum(coalesce(base_pay, 0)), 2), "
+                "       count(*) FILTER (WHERE paid_flag) FROM features_period"
+            ).fetchone()
+        finally:
+            con.close()
+
+    build_features(cfg, policy, force=True)
+    before = summary()
+    assert stale_periods(cfg, policy) == []
+
+    # One month's raw data rewritten. The bytes are the same, so the store it
+    # produces must be too -- what changed is the file, which is all the build
+    # is entitled to notice.
+    month = cfg.period_list[-1]
+    partition = (
+        cfg.lake / "fact_payroll_monthly" / f"period={month}" / "part-0000.parquet"
+    )
+    partition.write_bytes(partition.read_bytes())
+
+    assert stale_periods(cfg, policy) == [month]
+    built = build_features(cfg, policy)
+    assert built.rebuilt == [month]
+    assert built.seconds < built.full_seconds
+    assert summary() == before
+    assert stale_periods(cfg, policy) == []
+
+
+def test_a_policy_change_rebuilds_every_month(cfg, policy: DetectorPolicy):
+    """Anything global is not a monthly rebuild: `employee_master` is joined
+    into all twenty-four months, and so is the policy pack."""
+    build_features(cfg, policy, force=True)
+    assert stale_periods(cfg, policy) == []
+    other = _Tighter(policy, digest={**policy.digest, "fusion.yaml": "sha256:moved"})
+    assert stale_periods(cfg, other) == cfg.period_list
 
 
 # --------------------------------------------------------------------------

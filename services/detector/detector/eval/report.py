@@ -407,6 +407,18 @@ def render(report: EvalReport) -> str:
                 + (f"| {peak:.2f} GB |" if peak else "| not measured |")
             )
         add("")
+        for profile in tiers:
+            rebuilt = list(profile.get("features_rebuilt") or [])
+            full = float(profile.get("features_full_seconds") or 0.0)
+            measured = float((profile.get("stages") or {}).get("features") or 0.0)
+            if rebuilt and full and abs(full - measured) > 1.0:
+                add(
+                    f"`{profile.get('scale')}` is a **monthly** run: "
+                    f"{len(rebuilt)} month(s) of features rebuilt and every employee "
+                    f"re-scored. Building that store from nothing is {full:.0f} s "
+                    f"({full / 60:.0f} min) against the {measured:.0f} s above."
+                )
+        add("")
     add("## 6. Policy digest")
     add("")
     add(

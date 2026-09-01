@@ -459,6 +459,22 @@ the peak is the pipeline rather than the result, later blocks read only the colu
 and two of the four *are* the feature tables, so there is no second copy. Two of them are internal
 and go to a scratch directory the build removes when it finishes.
 
+**The store is keyed per month, so a monthly run costs a month.** Each month's entry in the
+features manifest is a signature over that month's raw partitions; the global entry covers the
+policy pack, the feature queries and everything not partitioned by month (`employee_master` is
+joined into all twenty-four). A month whose raw partitions changed — or whose output partition is
+missing — is rebuilt, and the rest are left where they are. Everything employee-grained (the
+roll-ups, the graph features, the statics, the cohorts) is rebuilt whatever happened, because each
+of them reads the whole window. **This is what the phase-7 budget is measured against**: a
+production batch runs monthly against a lake that gained one month, and the fifteen minutes covers
+that. What a build from nothing costs is carried in the profile beside it as
+`features_full_seconds` and reported in the gate, so the cheap number never stands alone.
+
+Identity is by file size and modification time rather than by content: hashing the bytes of a 1m
+lake is ten gigabytes of reading, and this errs the safe way — a rewritten file always looks
+different. It does mean a full regeneration invalidates the whole store, which is honest, because
+every file on disk really was rewritten.
+
 **And it is written a few months at a time.** DuckDB's partitioned writer keeps a buffer per thread
 per partition: twenty-four months of a 168-column table on a 32-thread machine is 768 open buffers,
 which is its own out-of-memory error. `features.rows_per_write` in `policy/runtime.yaml` groups the

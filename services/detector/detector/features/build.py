@@ -76,6 +76,9 @@ class FeatureBuild:
     columns: dict[str, int] = field(default_factory=dict)
     cache_key: str = ""
     cached: bool = False
+    # The months this build wrote, and what a rebuild of every month costs.
+    rebuilt: list[int] = field(default_factory=list)
+    full_seconds: float = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -187,37 +190,134 @@ def render(
 # --------------------------------------------------------------------------
 
 
-def cache_key(cfg: DetectorConfig, policy: DetectorPolicy) -> str:
-    """Stage + input digest + policy digest (docs/specs/detector.md, CLI section).
+# The raw tables partitioned by month. One of these changing for one month
+# invalidates that month of the feature store and nothing else.
+PERIOD_SOURCES: tuple[str, ...] = (
+    "fact_payroll_monthly",
+    "fact_payroll_allowance",
+    "fact_attendance_monthly",
+    "fact_system_activity_monthly",
+)
 
-    The SQL sources are part of the key: editing a feature query must invalidate
-    the store, or the next run silently scores against the previous shape.
+# Everything else the build reads. A change here is a change to every month:
+# `employee_master` is joined into all twenty-four of them.
+GLOBAL_SOURCES: tuple[str, ...] = (
+    "employee_master",
+    "fact_assignment_history",
+    "fact_bank_account",
+    "dim_calendar",
+    "dim_site",
+    "dim_job",
+    "dim_org_unit",
+    "dim_grade",
+    "dim_allowance",
+    "dim_region",
+)
+
+
+def _files(root: Path) -> str:
+    """Name, size and modification time of every Parquet file under a directory.
+
+    Identity by size and mtime rather than by content: hashing the bytes of a
+    1m lake is ten gigabytes of reading, and this errs the safe way -- a
+    rewritten file always looks different, so a change can be missed only if a
+    file is rewritten to the same size in the same second. It does mean a full
+    regeneration invalidates the whole store, which is honest: every file on
+    disk really was rewritten.
     """
+    if not root.exists():
+        return f"{root.name}:absent"
+    parts = []
+    for path in sorted(root.rglob("*.parquet")):
+        stat = path.stat()
+        parts.append(f"{path.name}:{stat.st_size}:{int(stat.st_mtime)}")
+    return f"{root.name}:" + "|".join(parts)
+
+
+def _digest(*parts: str) -> str:
     import hashlib
 
+    return "sha256:" + hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def global_inputs(cfg: DetectorConfig, policy: DetectorPolicy) -> str:
+    """The signature of everything that affects every month at once."""
     parts = [
         "features",
         cfg.scale,
-        str(cfg.manifest.get("generated_at", "")),
         str(cfg.manifest.get("seed", "")),
         json.dumps(policy.digest, sort_keys=True),
     ]
     for block in BLOCKS:
         parts.append((SQL_DIR / block).read_text(encoding="utf-8"))
-    return "sha256:" + hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    for table in GLOBAL_SOURCES:
+        parts.append(_files(cfg.lake / table))
+    return _digest(*parts)
+
+
+def period_inputs(cfg: DetectorConfig, period: int) -> str:
+    """The signature of one month's raw partitions."""
+    return _digest(
+        *(_files(cfg.lake / table / f"period={period}") for table in PERIOD_SOURCES)
+    )
+
+
+def period_signatures(cfg: DetectorConfig) -> dict[str, str]:
+    return {str(period): period_inputs(cfg, period) for period in cfg.period_list}
+
+
+def cache_key(cfg: DetectorConfig, policy: DetectorPolicy) -> str:
+    """Stage + input digest + policy digest (docs/specs/detector.md, CLI section).
+
+    The SQL sources are part of the key: editing a feature query must invalidate
+    the store, or the next run silently scores against the previous shape. So is
+    every raw file the build reads, month by month -- which is what lets the
+    build rebuild one month, and lets every layer downstream notice that it did.
+    """
+    signatures = period_signatures(cfg)
+    return _digest(
+        global_inputs(cfg, policy),
+        *(f"{period}:{value}" for period, value in sorted(signatures.items())),
+    )
+
+
+def _stored(cfg: DetectorConfig) -> dict:
+    if not cfg.features_manifest.exists():
+        return {}
+    try:
+        return dict(json.loads(cfg.features_manifest.read_text(encoding="utf-8")))
+    except json.JSONDecodeError:
+        return {}
+
+
+def stale_periods(cfg: DetectorConfig, policy: DetectorPolicy) -> list[int]:
+    """The months this build has to write. Empty means the store is current.
+
+    A month is stale when its raw partitions have changed or its output
+    partition is missing; every month is stale when something global changed --
+    the policy pack, a feature query, `employee_master`. This is what makes a
+    monthly run cost a month: twenty-four months of a 168-column table is half
+    an hour at 1m, and one month of it is a minute (phase 7).
+    """
+    stored = _stored(cfg)
+    everything = list(cfg.period_list)
+    if not stored or not all(cfg.feature_dir(name).exists() for name, _ in OUTPUTS):
+        return everything
+    if stored.get("global") != global_inputs(cfg, policy):
+        return everything
+    was = dict(stored.get("periods") or {})
+    now = period_signatures(cfg)
+    return [
+        period
+        for period in everything
+        if was.get(str(period)) != now[str(period)]
+        or not (cfg.feature_dir("features_period") / f"period_part={period}").exists()
+    ]
 
 
 def is_current(cfg: DetectorConfig, policy: DetectorPolicy) -> bool:
     """True when the feature store on disk was built from exactly these inputs."""
-    if not cfg.features_manifest.exists():
-        return False
-    try:
-        stored = json.loads(cfg.features_manifest.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    if stored.get("cache_key") != cache_key(cfg, policy):
-        return False
-    return all(cfg.feature_dir(name).exists() for name, _ in OUTPUTS)
+    return bool(_stored(cfg)) and not stale_periods(cfg, policy)
 
 
 # --------------------------------------------------------------------------
@@ -276,6 +376,7 @@ def stream(
     policy: DetectorPolicy,
     block: str,
     name: str,
+    periods: list[int] | None = None,
 ) -> None:
     """Materialise one employee x period intermediate to Parquet, not to memory.
 
@@ -289,11 +390,25 @@ def stream(
     Two of the four are the feature tables themselves, so this *is* their write
     -- there is no second copy. The other two are internal, and go to a scratch
     directory the build removes when it finishes.
+
+    `periods` is the months to write. A full build passes all of them and the
+    target is replaced; a monthly build passes the stale ones and only those
+    partitions are replaced, leaving the other twenty-three where they are.
     """
     output = STREAMED[name]
     target = cfg.feature_dir(output) if output else cfg.features / SCRATCH / name
+    wanted = list(periods or cfg.period_list)
+    partial = len(wanted) < len(cfg.period_list)
     if target.exists():
-        shutil.rmtree(target)
+        if partial:
+            # Only the months being rewritten. Removed rather than appended to,
+            # or the month would end up in the store twice.
+            for period in wanted:
+                stale = target / f"period_part={period}"
+                if stale.exists():
+                    shutil.rmtree(stale)
+        else:
+            shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     path = str(target).replace("\\", "/")
     # A few months per statement rather than the whole window. The partitioned
@@ -303,17 +418,20 @@ def stream(
     # holds 64, and the filter prunes every input to those months' partitions.
     # At 10k and 100k the whole window is one group, so this is one statement
     # and exactly the plan phases 3 to 6 ran.
-    groups = windows(cfg, policy.rows_per_write)
+    groups = [g for g in (windows(cfg, policy.rows_per_write)) if set(g) & set(wanted)]
+    groups = [[period for period in group if period in wanted] for group in groups]
     for group in groups:
         query = _query_of(render(block, policy, group), name)
-        # `APPEND` because each group writes different months into the same
-        # directory, and DuckDB then insists the file name be unique per write.
-        # A single-group build keeps the numbered names phases 3 to 6 wrote.
-        pattern = "part-{uuid}" if len(groups) > 1 else "part-{i}"
+        # `APPEND` because a write lands in a directory that already holds other
+        # months -- either an earlier group's or an earlier build's -- and
+        # DuckDB then insists the file name be unique per write. A whole-window
+        # build in one group keeps the numbered names phases 3 to 6 wrote.
+        append = len(groups) > 1 or partial
+        pattern = "part-{uuid}" if append else "part-{i}"
         con.execute(
             f"COPY (SELECT *, period AS period_part FROM ({query})) TO '{path}' "
             f"(FORMAT PARQUET, PARTITION_BY (period_part), "
-            + ("APPEND, " if len(groups) > 1 else "")
+            + ("APPEND, " if append else "")
             + f"ROW_GROUP_SIZE {ROW_GROUP_ROWS}, "
             + f"FILENAME_PATTERN '{pattern}')"
         )
@@ -361,8 +479,9 @@ def build(
     """Build the feature store. Returns the runtime profile the eval report shows."""
     policy.require_digest(cfg.manifest)
     key = cache_key(cfg, policy)
-    if not force and is_current(cfg, policy):
-        stored = json.loads(cfg.features_manifest.read_text(encoding="utf-8"))
+    stored = _stored(cfg)
+    stale = list(cfg.period_list) if force else stale_periods(cfg, policy)
+    if not stale:
         return FeatureBuild(
             seconds=float(stored.get("seconds", 0.0)),
             block_seconds=dict(stored.get("block_seconds") or {}),
@@ -370,10 +489,22 @@ def build(
             columns={k: int(v) for k, v in (stored.get("columns") or {}).items()},
             cache_key=key,
             cached=True,
+            rebuilt=[],
+            full_seconds=float(
+                stored.get("full_seconds") or stored.get("seconds") or 0.0
+            ),
         )
 
+    # A month at a time where the lake changed a month at a time. Everything
+    # employee-grained -- the roll-ups, the graph features, the statics, the
+    # cohorts -- is rebuilt whatever happened, because each of them reads the
+    # whole window.
+    full = len(stale) == len(cfg.period_list)
     started = time.perf_counter()
-    result = FeatureBuild(seconds=0.0, cache_key=key)
+    result = FeatureBuild(seconds=0.0, cache_key=key, rebuilt=sorted(stale))
+    if log and not full:
+        log(f"  rebuilding {len(stale)} of {len(cfg.period_list)} months: "
+            + ", ".join(str(p) for p in sorted(stale)))
     con = connect(cfg, threads=threads, policy=policy)
     # Nothing downstream reads the feature store in file order -- every layer
     # orders what it needs explicitly, and the evidence fingerprint sorts its
@@ -387,7 +518,7 @@ def build(
             for statement in statements(render(block, policy)):
                 name, _query = split_create(statement)
                 if name in STREAMED:
-                    stream(con, cfg, policy, block, name)
+                    stream(con, cfg, policy, block, name, periods=stale)
                 else:
                     con.execute(statement)
             elapsed = time.perf_counter() - block_started
@@ -409,13 +540,26 @@ def build(
             shutil.rmtree(scratch, ignore_errors=True)
 
     result.seconds = round(time.perf_counter() - started, 3)
+    # What a rebuild of the whole store costs, kept across monthly builds: a
+    # gate that only ever saw the incremental figure could not tell anybody
+    # what building this store from nothing actually takes.
+    result.full_seconds = (
+        result.seconds
+        if full
+        else float(stored.get("full_seconds") or stored.get("seconds") or 0.0)
+    )
     cfg.features_manifest.parent.mkdir(parents=True, exist_ok=True)
     cfg.features_manifest.write_text(
         json.dumps(
             {
                 "scale": cfg.scale,
                 "cache_key": key,
+                "global": global_inputs(cfg, policy),
+                "periods": period_signatures(cfg),
+                "rebuilt": result.rebuilt,
+                "full_build": full,
                 "seconds": result.seconds,
+                "full_seconds": result.full_seconds,
                 "block_seconds": result.block_seconds,
                 "row_counts": result.row_counts,
                 "columns": result.columns,

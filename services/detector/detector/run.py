@@ -85,6 +85,10 @@ class RunResult:
     l3_scores_path: Path | None = None
     alerts_path: Path | None = None
     agg_path: Path | None = None
+    # Which months the feature build wrote, and what rebuilding all of them
+    # costs -- a monthly run rebuilds one, and both numbers are reported.
+    features_rebuilt: list[int] = field(default_factory=list)
+    features_full_seconds: float = 0.0
 
     @property
     def findings(self) -> list[dict]:
@@ -518,6 +522,15 @@ def record_profile(
         "seconds": float(result.seconds),
         "stage_seconds_total": round(sum(stages.values()), 3),
         "cached": sorted(cached),
+        # A monthly run rebuilds the months that changed; `features_full_seconds`
+        # is what rebuilding every month costs, carried forward so the gate can
+        # report both rather than letting the cheap number stand alone.
+        "features_rebuilt": list(result.features_rebuilt),
+        "features_full_seconds": round(
+            float(result.features_full_seconds)
+            or float(previous.get("features_full_seconds") or 0.0),
+            3,
+        ),
         # What the profile was measured against. A budget met under a different
         # lake or a different policy pack is not evidence about this one, and
         # the phase gate says so rather than reporting a stale pass.
@@ -567,10 +580,17 @@ def run(
         )
         result.stage_cached["features"] = built.cached
         result.rows.update(built.row_counts)
+        result.features_rebuilt = list(built.rebuilt)
+        result.features_full_seconds = float(built.full_seconds)
         if log:
             log(
                 f"features  {built.row_counts.get('features_period', 0):,} rows"
                 + ("  (cached)" if built.cached else f"  {built.seconds:.2f}s")
+                + (
+                    ""
+                    if built.cached or len(built.rebuilt) == len(cfg.period_list)
+                    else f"  ({len(built.rebuilt)} month(s) rebuilt)"
+                )
             )
 
     if "l1" in wanted:
