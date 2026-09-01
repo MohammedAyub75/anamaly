@@ -33,6 +33,7 @@ POLICY_FILES = (
     "fusion.yaml",
     "injection.yaml",
     "peer_stats.yaml",
+    "graph_ml.yaml",
 )
 
 NATIONALITY_CLASSES = ("saudi", "gcc", "expat")
@@ -337,6 +338,11 @@ class PolicyPack:
     def peer_stats(self) -> dict[str, Any]:
         """Layer-2 dials: robust-statistic guards, the salary model, the codes."""
         return self.raw["peer_stats.yaml"]
+
+    @property
+    def graph_ml(self) -> dict[str, Any]:
+        """Layer-3 dials: the model matrix, the two models, the graph checks."""
+        return self.raw["graph_ml.yaml"]
 
     # ------------------------------------------------------------- validation
 

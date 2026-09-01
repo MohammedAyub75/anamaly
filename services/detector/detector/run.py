@@ -24,17 +24,20 @@ from .features.build import feature_columns
 from .lake import connect
 from .layers.l1_rules import L1Result, RuleSet, run_rules
 from .layers.l2_peer import L2Result, run_peer
+from .layers.l3_graph import L3Result, run_l3
 
 # In execution order. Later stages are declared here so `--stages` has a stable
 # surface and asking for one that is not built yet fails loudly.
 STAGES: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion")
 
-BUILT: tuple[str, ...] = ("features", "l1", "l2")
+BUILT: tuple[str, ...] = ("features", "l1", "l2", "l3")
 
-STAGE_PHASE = {"l3": 5, "fusion": 6}
+STAGE_PHASE = {"fusion": 6}
 
 HITS_FILE = "l1_hits.parquet"
 L2_HITS_FILE = "l2_hits.parquet"
+L3_HITS_FILE = "l3_hits.parquet"
+L3_SCORES_FILE = "l3_scores.parquet"
 STATE_FILE = "_stages.json"
 
 
@@ -54,13 +57,20 @@ class RunResult:
     rows: dict[str, int] = field(default_factory=dict)
     l1: L1Result | None = None
     l2: L2Result | None = None
+    l3: L3Result | None = None
     hits_path: Path | None = None
     l2_hits_path: Path | None = None
+    l3_hits_path: Path | None = None
+    l3_scores_path: Path | None = None
 
     @property
     def findings(self) -> list[dict]:
         """Every layer's hits in one list -- what phase 6 fuses and scores."""
-        return (self.l1.hits if self.l1 else []) + (self.l2.hits if self.l2 else [])
+        return (
+            (self.l1.hits if self.l1 else [])
+            + (self.l2.hits if self.l2 else [])
+            + (self.l3.hits if self.l3 else [])
+        )
 
     @property
     def runtime(self) -> dict[str, float]:
@@ -87,6 +97,20 @@ def layer2_digest(policy) -> str:
     for name in ("l2_peer.py", "l2_salary.py"):
         digest.update((Path(__file__).parent / "layers" / name).read_bytes())
     digest.update(json.dumps(policy.peer_stats, sort_keys=True).encode("utf-8"))
+    return "sha256:" + digest.hexdigest()
+
+
+def layer3_digest(policy) -> str:
+    """A hash over the layer-3 models, the graph checks and their dials.
+
+    Same contract as `layer2_digest`: editing a detector or a hyperparameter
+    must invalidate the stage, because a cached score fitted under different
+    settings is a wrong number rather than a stale one.
+    """
+    digest = hashlib.sha256()
+    for name in ("l3_graph.py", "l3_ml.py"):
+        digest.update((Path(__file__).parent / "layers" / name).read_bytes())
+    digest.update(json.dumps(policy.graph_ml, sort_keys=True).encode("utf-8"))
     return "sha256:" + digest.hexdigest()
 
 
@@ -173,12 +197,42 @@ def read_hits(cfg: DetectorConfig) -> L1Result:
     return result
 
 
+def write_scores(cfg: DetectorConfig, result: L3Result) -> Path:
+    """Layer 3's per-employee scores -- what phase 6 fuses as `ml_unsupervised`.
+
+    Written beside the findings rather than folded into them: the two graph
+    codes are findings about a handful of employees, while the models score
+    every employee in the population and most of those scores never become an
+    alert on their own.
+    """
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg.run_dir / L3_SCORES_FILE
+    table = result.ml.table if result.ml else None
+    if table is None:
+        pl.DataFrame(schema={"employee_id": pl.Utf8}).write_parquet(path)
+        return path
+    pl.from_arrow(table).write_parquet(path)
+    return path
+
+
 def read_peer_hits(cfg: DetectorConfig) -> L2Result:
     """Load a cached layer-2 pass back. The cohort report is not cached: it is
     a description of the run rather than an input to it, and rebuilding it
     would mean re-running the stage the cache exists to skip."""
     frame = pl.read_parquet(cfg.run_dir / L2_HITS_FILE)
     result = L2Result(seconds=0.0, hits=frame.to_dicts())
+    _recount(result)
+    result.codes = tuple(sorted(result.by_code))
+    return result
+
+
+def read_graph_hits(cfg: DetectorConfig) -> L3Result:
+    """Load a cached layer-3 pass back. As for layer 2, the description of the
+    run -- the component counts and the model summary -- is not cached: it
+    describes the pass rather than feeding it, and rebuilding it would mean
+    re-fitting the models the cache exists to skip."""
+    frame = pl.read_parquet(cfg.run_dir / L3_HITS_FILE)
+    result = L3Result(seconds=0.0, hits=frame.to_dicts())
     _recount(result)
     result.codes = tuple(sorted(result.by_code))
     return result
@@ -272,6 +326,42 @@ def run(
             _save_state(cfg, state)
             if log:
                 log(f"l2        {l2.total:,} findings  {l2.seconds:.2f}s")
+
+    if "l3" in wanted:
+        key = "|".join(
+            [features_cache_key(cfg, policy), layer3_digest(policy), cfg.run_id]
+        )
+        cached = cfg.run_dir / L3_HITS_FILE
+        scores = cfg.run_dir / L3_SCORES_FILE
+        if (
+            not force
+            and state.get("l3") == key
+            and cached.exists()
+            and scores.exists()
+        ):
+            result.l3 = read_graph_hits(cfg)
+            result.l3_hits_path = cached
+            result.l3_scores_path = scores
+            result.stage_seconds["l3 (cached)"] = float(state.get("l3_seconds", 0.0))
+            result.stage_cached["l3"] = True
+            if log:
+                log(f"l3        {len(result.l3.hits):,} findings  (cached)")
+        else:
+            con = connect(cfg, features=True, threads=threads)
+            try:
+                l3 = run_l3(con, policy, log=log)
+            finally:
+                con.close()
+            result.l3 = l3
+            result.l3_hits_path = write_hits(cfg, l3, L3_HITS_FILE)
+            result.l3_scores_path = write_scores(cfg, l3)
+            result.stage_seconds["l3"] = l3.seconds
+            result.stage_cached["l3"] = False
+            state["l3"] = key
+            state["l3_seconds"] = l3.seconds
+            _save_state(cfg, state)
+            if log:
+                log(f"l3        {l3.total:,} findings  {l3.seconds:.2f}s")
 
     result.seconds = round(time.perf_counter() - started, 3)
     return result

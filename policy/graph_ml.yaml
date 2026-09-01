@@ -1,0 +1,273 @@
+# ---------------------------------------------------------------------------
+# policy/graph_ml.yaml — layer 3, the unsupervised models and the graph checks
+#
+# Read by `services/detector/detector/layers/l3_ml.py` and `l3_graph.py`
+# (phase 5). The split follows the same principle `peer_stats.yaml` set for
+# layer 2: the *computation* is Python because a connected component, a
+# Jaro-Winkler comparison and a reconstruction gap are not SQL predicates, and
+# everything a customer would want to turn lives here — the thresholds, the
+# severities, the wording a reviewer reads, and what to do about it.
+#
+# Numbers that already exist in another pack are NOT repeated here:
+#
+#   fusion.layer_weights.{ml_unsupervised, graph}   -> phase 6 fusion
+#   fusion.peer_cohort.*                            -> layer 2
+#
+# Contracts: docs/ANOMALY_CATALOG.md (what each code means),
+#            docs/EVIDENCE_CONTRACT.md (graph_context, feature_attributions).
+# ---------------------------------------------------------------------------
+version: 1
+
+# ---------------------------------------------------------------------------
+# The matrix both models learn from. Named by exclusion rather than by listing
+# every column: `features_employee` grows as later layers need more, and a
+# hand-maintained include list would silently stop feeding the models the day
+# somebody adds a feature.
+# ---------------------------------------------------------------------------
+matrix:
+  table: features_employee
+  # Identifiers, free text and dates. None of these is a property of the
+  # employee that a model should learn from — an employee id carries no signal
+  # and a name carries only the order the generator wrote rows in.
+  exclude:
+    - employee_id
+    - as_of_period
+    - name_en
+    - name_ar
+    - badge_no
+    - job_code
+    - org_unit_id
+    - parent_org_unit_id
+    - org_unit_name_en
+    - cost_center
+    - manager_id
+    - work_site_id
+    - site_name_en
+    - job_title_en
+    - first_period_paid_any
+    - last_period_paid_any
+  # Low-cardinality strings, embedded rather than one-hot: an embedding costs
+  # one row of a lookup table per level instead of one column per level, which
+  # is what keeps the matrix at ~60 columns rather than ~400 at 1m.
+  categorical:
+    - gender
+    - nationality
+    - nationality_class
+    - service_band
+    - employment_type
+    - contract_type
+    - status
+    - source_system
+    - job_family
+    - business_line
+    - region_code
+    - site_class
+    - work_pattern
+    - housing_type
+    - transport_mode
+
+# ---------------------------------------------------------------------------
+# Isolation Forest. The workhorse of the layer: it isolates a point in few
+# splits precisely when the point is unusual in several dimensions at once,
+# which is the shape of most of what family C and D describe.
+# ---------------------------------------------------------------------------
+isolation_forest:
+  # Set from the expected anomaly rate, never left at 'auto'
+  # (docs/specs/detector.md). docs/ANOMALY_CATALOG.md puts roughly 2.5% of the
+  # population on at least one code, and that expectation is a property of the
+  # business, not of the labels — no detector reads the injected rates.
+  contamination: 0.025
+  n_estimators: 300
+  max_samples: 256
+  max_features: 1.0
+  random_state: 42
+  n_jobs: -1
+
+# ---------------------------------------------------------------------------
+# Tabular denoising autoencoder (PyTorch). Categorical embeddings plus a
+# numeric branch; the reconstruction gap is the score and the per-feature gap
+# is the attribution. CUDA when the machine has it, CPU when it does not —
+# slower is fine, a hard CUDA dependency is not.
+# ---------------------------------------------------------------------------
+autoencoder:
+  device: auto              # auto | cuda | cpu
+  hidden: [128, 64]
+  bottleneck: 24
+  # Embedding width per categorical: min(embedding_max, ceil(levels ** 0.5)).
+  embedding_max: 8
+  epochs: 60
+  batch_size: 4096
+  learning_rate: 0.003
+  weight_decay: 0.000001
+  # Denoising: this share of each input row is blanked before the encoder sees
+  # it, so the model has to learn what the rest of the row implies rather than
+  # copying its input through.
+  noise_rate: 0.15
+  # Categorical reconstruction is a classification problem and numeric
+  # reconstruction a regression one; this weights the former into one loss.
+  categorical_loss_weight: 0.5
+  seed: 42
+  # Two runs over one lake must produce the same score, or the same alert
+  # changes wording between runs.
+  deterministic: true
+  attribution_top_n: 5
+  # A feature contributing less than this share of the gap is noise on a
+  # payslip and is folded into everything else rather than shown.
+  attribution_min_share: 0.03
+
+# ---------------------------------------------------------------------------
+# Graph checks. Candidate components are found set-based in DuckDB; networkx
+# walks only the candidate subgraphs, never a million-node graph.
+# ---------------------------------------------------------------------------
+graph:
+  # A component this size or larger is a candidate. Two people is already a
+  # shared account.
+  min_component_size: 2
+  # Reported in the evidence; a component larger than this is summarised.
+  max_members_reported: 10
+  # Jaro-Winkler over `name_en_normalised`, after blocking on date of birth and
+  # bank account (docs/ANOMALY_CATALOG.md, C06).
+  name_similarity_threshold: 0.90
+  jaro_winkler_prefix_weight: 0.1
+  jaro_winkler_prefix_max: 4
+  # The last digits of an account or an identity number a reviewer is shown.
+  # Never the whole number: the alert is read by people who do not need it.
+  mask_visible_digits: 4
+  # A manager chain longer than this is a hierarchy, not a cycle. Bounds the
+  # candidate subgraph handed to networkx.
+  max_cycle_length: 6
+
+# ---------------------------------------------------------------------------
+# The five codes layer 3 owns. `docs/ANOMALY_CATALOG.md` is authoritative for
+# what each one MEANS; this file carries the dials and the wording.
+#
+# Every description is written for a non-technical reviewer: SAR amounts,
+# months and names. No model names, no scores, no gaps (CLAUDE.md).
+# ---------------------------------------------------------------------------
+codes:
+
+  C01:
+    name_en: One bank account shared by unrelated employees
+    name_ar: "حساب بنكي واحد يتقاضى عليه موظفون لا تربطهم صلة"
+    severity: CRITICAL
+    regulatory_reference: "HR-PAY-004 Payment Instrument Control s.2"
+    enabled: true
+    metric: shared_iban
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      SAR {total_monthly_disbursement:,.0f} a month is paid into a single bank
+      account ending {link_value_masked}, shared by {component_size} employees
+      working in different parts of the business: {related_summary}. None of
+      them declares any of the others as a spouse. This record's own SAR
+      {monthly_impact:,.0f} a month is part of that total, and SAR
+      {cumulative_impact:,.0f} has been paid on it over {months_paid_label}.
+    recommended_actions:
+      - "Hold payroll on the account ending {link_value_masked} for all {component_size} employees"
+      - "Verify the identity and bank documents behind each of the {component_size} records"
+      - "Escalate to investigation — SAR {total_monthly_disbursement:,.0f} a month goes to one account"
+
+  C02:
+    name_en: The same identity number on more than one employee record
+    name_ar: "رقم هوية واحد على أكثر من سجل موظف"
+    severity: CRITICAL
+    regulatory_reference: "HR-IDN-001 Identity Verification s.1"
+    enabled: true
+    metric: duplicate_identity
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      The same {identifier_label} ending {link_value_masked} appears on
+      {component_size} separate employee records — {related_summary} — and each
+      one draws its own salary. This record has been paid SAR
+      {monthly_impact:,.0f} a month for {months_paid_label}, SAR
+      {cumulative_impact:,.0f} in total.
+    recommended_actions:
+      - "Hold payroll on every one of the {component_size} records except the one whose documents can be verified"
+      - "Compare the hire dates and identity documents of the {component_size} records side by side"
+      - "Escalate to investigation — one {identifier_label} cannot belong to {component_size} people"
+
+  C03:
+    name_en: Paid every month with no sign of attendance
+    name_ar: "يُصرف له الراتب شهريًا دون أي دليل على الحضور"
+    severity: CRITICAL
+    regulatory_reference: "HR-PAY-002 Payroll Attendance Control s.1"
+    enabled: true
+    metric: dormant_paid
+    impact_confidence: exact
+    thresholds:
+      # Consecutive paid months with nothing to show for them before this is a
+      # case. Six months is long enough that a posting, a secondment or a
+      # system outage cannot account for it.
+      min_silent_months: 6
+      # Corroboration, not a trigger. Where the two unsupervised models both
+      # put the record this far up the workforce, the finding says so; below
+      # it, the sentence falls back to what the attendance record itself shows.
+      # A dormancy this long is a fact either way, and a model that stayed
+      # quiet must never be the reason a ghost is not raised.
+      corroboration_score: 90.0
+    description: >
+      The employee has been paid SAR {monthly_impact:,.0f} a month for
+      {months_paid} consecutive months from {first_period_label} with no badge
+      entry and no system login in any of them — SAR {cumulative_impact:,.0f}
+      in total. {corroboration}
+    recommended_actions:
+      - "Hold payroll on this record immediately"
+      - "Ask the line manager to confirm the employee in person"
+      - "Escalate to investigation and review how SAR {cumulative_impact:,.0f} was released"
+
+  C05:
+    name_en: An approval signed by the person it benefits
+    name_ar: "اعتماد وقّعه الشخص المستفيد منه"
+    severity: HIGH
+    regulatory_reference: "HR-GOV-003 Segregation of Duties s.1"
+    enabled: true
+    metric: approval_integrity
+    impact_confidence: estimated
+    thresholds: {}
+    # Two ways in, and they read nothing like each other: one is a signature on
+    # a record, the other is a reporting line that closes on itself. Sharing a
+    # template would have produced a sentence that fits neither.
+    routes:
+      self_approval:
+        description: >
+          The employee approved their own {change_reason_label} dated
+          {effective_from}, which moved base pay to SAR
+          {new_base_salary:,.0f} a month. That level has been paid for
+          {months_paid_label} since {first_period_label}, SAR
+          {cumulative_impact:,.0f} in total.
+        recommended_actions:
+          - "Void the approval and obtain an authorisation from the approver's own manager"
+          - "Review every other record this employee has approved"
+          - "Correct the approval routing so a record cannot be signed by the person it benefits"
+      manager_cycle:
+        description: >
+          The reporting line closes on itself: {cycle_path}. Each of these
+          {cycle_length} employees reports, directly or indirectly, to somebody
+          who reports back to them, so nobody in the chain has an independent
+          approver.
+        recommended_actions:
+          - "Correct the reporting line for the {cycle_length} employees in the chain"
+          - "Review every approval signed inside the chain since it closed"
+          - "Confirm the correct manager for each position with Division HR"
+
+  C06:
+    name_en: Two employee records that look like the same person
+    name_ar: "سجلان لموظفَين يبدو أنهما لشخص واحد"
+    severity: HIGH
+    regulatory_reference: "HR-IDN-001 Identity Verification s.3"
+    enabled: true
+    metric: near_duplicate_identity
+    impact_confidence: estimated
+    thresholds: {}
+    description: >
+      Two employee records share a date of birth ({dob}) and the bank account
+      ending {link_value_masked}, and their names differ by
+      {name_edit_distance} letters — {name_en} on this record and
+      {other_name_en} on {other_employee_id}. Both are being paid: SAR
+      {monthly_impact:,.0f} a month here and SAR {other_monthly_net:,.0f} on
+      the other record.
+    recommended_actions:
+      - "Hold payroll on the more recently created record ({newer_employee_id})"
+      - "Verify the identity documents of both records against each other"
+      - "Merge or terminate the duplicate record once the documents are checked"

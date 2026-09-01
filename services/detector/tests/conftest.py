@@ -24,6 +24,7 @@ from detector.features.build import build, feature_columns
 from detector.lake import connect, connect_labels
 from detector.layers.l1_rules import RuleSet, run_rules
 from detector.layers.l2_peer import run_peer
+from detector.layers.l3_graph import run_l3
 from detector.policy import DetectorPolicy
 
 SCALE = "10k"
@@ -96,5 +97,12 @@ def l2(con, policy: DetectorPolicy):
 
 
 @pytest.fixture(scope="session")
-def evaluation(cfg: DetectorConfig, ruleset: RuleSet, l1, l2, policy: DetectorPolicy):
-    return harness.evaluate(cfg, ruleset, l1, l2, policy_digest=policy.digest)
+def l3(con, policy: DetectorPolicy):
+    """One layer-3 pass: both models, the candidate graph and the five codes."""
+    return run_l3(con, policy)
+
+
+@pytest.fixture(scope="session")
+def evaluation(cfg: DetectorConfig, ruleset: RuleSet, l1, l2, l3,
+               policy: DetectorPolicy):
+    return harness.evaluate(cfg, ruleset, l1, l2, l3, policy_digest=policy.digest)

@@ -26,6 +26,8 @@ from ..lake import connect_labels
 from ..layers.l1_rules import L1Result, RuleSet
 from ..layers.l2_peer import CohortAssignment, L2Result
 from ..layers.l2_salary import SalaryExpectation
+from ..layers.l3_graph import GraphSummary, L3Result
+from ..layers.l3_ml import MLScores
 
 # Precision is reported at the depths a reviewer actually works to. @100 matters
 # most: those are the alerts somebody opens on Monday morning.
@@ -45,12 +47,12 @@ PLANNED: dict[str, str] = {
     "B05": "L2 peer",
     "B06": "L2 peer",
     "B07": "L2 peer",
-    "C01": "L3 graph (phase 5)",
-    "C02": "L3 graph (phase 5)",
-    "C03": "L3 ML + rules (phase 5)",
+    "C01": "L3 graph",
+    "C02": "L3 graph",
+    "C03": "L3 ML + rules",
     "C04": "L1 rule",
-    "C05": "L3 graph (phase 5)",
-    "C06": "L3 graph (phase 5)",
+    "C05": "L3 graph",
+    "C06": "L3 graph",
     "C07": "L1 rule",
     "C08": "L1 rule",
     "D01": "L2 peer",
@@ -106,6 +108,37 @@ class ConfounderScore:
 
 
 @dataclass
+class MLSeparation:
+    """Whether the unsupervised layer ranks the injected cases above the rest.
+
+    Layer 3's two models produce no anomaly code, so they cannot appear in the
+    recall table -- but "it scored everybody the same" is exactly the failure
+    that table would have caught for a rule, and it has to be visible somewhere.
+    Recall at a depth is the honest measure: if a reviewer worked the top decile
+    of the model's ranking alone, how much of the injected set would they meet?
+    """
+
+    scored: int
+    labelled: int
+    labelled_median: float
+    population_median: float
+    top_decile_recall: float
+    top_percent_recall: float
+    device: str
+    used_cuda: bool
+    features: int
+    contamination: float
+    epochs: int
+    forest_seconds: float
+    autoencoder_seconds: float
+
+    @property
+    def lift(self) -> float:
+        """How many times better than working a random tenth of the workforce."""
+        return self.top_decile_recall / 0.10 if self.top_decile_recall else 0.0
+
+
+@dataclass
 class EvalReport:
     """Everything `docs/EVAL_REPORT.md` renders, computed once."""
 
@@ -130,6 +163,11 @@ class EvalReport:
     # explains a weak peer signal better than any threshold does.
     cohorts: CohortAssignment | None = None
     salary: SalaryExpectation | None = None
+    # Layer 3's description of itself: how many candidate components the graph
+    # search actually had to walk, and whether the two unsupervised models rank
+    # the injected set above the rest of the workforce.
+    graph: GraphSummary | None = None
+    ml: MLSeparation | None = None
 
     # ------------------------------------------------------------ summaries
 
@@ -314,11 +352,64 @@ def _precision_at(con: duckdb.DuckDBPyConnection) -> dict[int, float | None]:
     return out
 
 
+def _ml_separation(
+    con: duckdb.DuckDBPyConnection, scores: MLScores
+) -> MLSeparation | None:
+    """Score the unsupervised layer against ground truth, without it ever seeing it.
+
+    The models were fitted on `lake.connect()`, which has no view over the
+    labels; this runs afterwards on the harness's own connection, over the
+    scores they produced.
+    """
+    if scores is None or scores.table is None or not scores.rows:
+        return None
+    con.register("ml_scores_eval", scores.table)
+    try:
+        row = con.execute(
+            """
+            WITH scored AS (
+                SELECT m.employee_id, m.ml_score,
+                       (l.employee_id IS NOT NULL) AS labelled,
+                       percent_rank() OVER (ORDER BY m.ml_score) * 100 AS rank_pct
+                FROM ml_scores_eval m
+                LEFT JOIN (SELECT DISTINCT employee_id FROM labels_anomaly) l
+                  USING (employee_id)
+            )
+            SELECT count(*),
+                   count(*) FILTER (WHERE labelled),
+                   median(ml_score) FILTER (WHERE labelled),
+                   median(ml_score),
+                   count(*) FILTER (WHERE labelled AND rank_pct >= 90),
+                   count(*) FILTER (WHERE labelled AND rank_pct >= 99)
+            FROM scored
+            """
+        ).fetchone()
+    finally:
+        con.unregister("ml_scores_eval")
+    scored, labelled = int(row[0]), int(row[1])
+    return MLSeparation(
+        scored=scored,
+        labelled=labelled,
+        labelled_median=float(row[2] or 0.0),
+        population_median=float(row[3] or 0.0),
+        top_decile_recall=(int(row[4]) / labelled) if labelled else 0.0,
+        top_percent_recall=(int(row[5]) / labelled) if labelled else 0.0,
+        device=scores.device,
+        used_cuda=scores.used_cuda,
+        features=scores.features,
+        contamination=scores.contamination,
+        epochs=scores.epochs,
+        forest_seconds=scores.forest_seconds,
+        autoencoder_seconds=scores.autoencoder_seconds,
+    )
+
+
 def evaluate(
     cfg: DetectorConfig,
     ruleset: RuleSet,
     l1: L1Result,
     l2: L2Result | None = None,
+    l3: L3Result | None = None,
     *,
     planned: dict[str, str] | None = None,  # defaults to PLANNED
     runtime: dict[str, float] | None = None,
@@ -334,7 +425,12 @@ def evaluate(
         )
     detectors = {code: "L1 rule" for code in ruleset.codes}
     detectors.update(l2.detectors if l2 else {})
-    findings = list(l1.hits) + (list(l2.hits) if l2 else [])
+    detectors.update(l3.detectors if l3 else {})
+    findings = (
+        list(l1.hits)
+        + (list(l2.hits) if l2 else [])
+        + (list(l3.hits) if l3 else [])
+    )
 
     con = connect_labels(cfg)
     try:
@@ -342,6 +438,7 @@ def evaluate(
         codes = _code_scores(con, detectors, planned or PLANNED)
         confounders = _confounder_scores(con)
         precision = _precision_at(con)
+        separation = _ml_separation(con, l3.ml) if l3 and l3.ml else None
         severity = dict(
             con.execute(
                 "SELECT severity, count(*) FROM hits GROUP BY 1 ORDER BY 1"
@@ -384,6 +481,8 @@ def evaluate(
         seconds=round(time.perf_counter() - started, 3),
         cohorts=l2.cohorts if l2 else None,
         salary=l2.salary if l2 else None,
+        graph=l3.graph if l3 else None,
+        ml=separation,
     )
     if not budget.get("by_code"):
         report.warnings.append("lake manifest carries no injection counts")

@@ -33,8 +33,8 @@ services/detector/
       l1_rules.py       # compiles policy/rules/*.yaml to DuckDB SQL
       l2_peer.py        # cohorts, robust z, the twelve L2 detectors, CUSUM
       l2_salary.py      # expected-salary model + TreeSHAP attribution in SAR
-      l3_ml.py          # isolation forest + tabular autoencoder
-      l3_graph.py       # shared IBAN / duplicate ID / manager cycles
+      l3_ml.py          # the matrix, isolation forest + tabular autoencoder
+      l3_graph.py       # shared IBAN / duplicate ID / manager cycles, and C03
       l4_fusion.py      # scoring, severity, evidence bundle, financial impact
     evidence/
       builder.py
@@ -266,6 +266,77 @@ Run in parallel; each produces a normalised score.
 Explicitly **not** doing: a transformer/foundation model over tabular HR data. It costs far more,
 loses to gradient boosting plus isolation forest at this data shape, and cannot explain itself to an
 auditor. This is a decision, not an omission.
+
+### What phase 5 actually wrote
+
+**Layer 3 owns five codes** — C01, C02, C03, C05 and C06, which is every code
+`docs/ANOMALY_CATALOG.md` marks `L3` and every code that had no detector after phase 4. They are
+configured in **`policy/graph_ml.yaml`**, a new pack on the same principle `peer_stats.yaml` set:
+the computation is Python because a connected component, a Jaro-Winkler comparison and a
+reconstruction gap are not SQL predicates, and only the dials, the severities and the wording live
+in YAML. Findings carry **the same seventeen columns as layer 1's and layer 2's**, written to
+`data/runs/run_id=<id>/l3_hits.parquet`, so phase 6 fuses one list rather than three.
+
+**The two models produce no anomaly code.** They score every employee, and the score is written
+separately to `data/runs/run_id=<id>/l3_scores.parquet` — `forest_score`,
+`reconstruction_score`, `ml_score` and a per-feature attribution — because phase 6 weights layer 3
+as one contributor over the whole population while the findings above are about a handful of
+employees. `ml_score` is the **mean** of the two percentile ranks, not the max: two models agreeing
+is the signal, and one model shouting alone is exactly what `corroboration_bonus` exists to price.
+
+**The matrix is named by exclusion, not by an include list.** `features_employee` grows as later
+layers need more columns, and a hand-maintained include list would silently stop feeding the models
+the day somebody adds a feature. `graph_ml.yaml` names the identifiers and free text to drop and
+the low-cardinality strings to embed; everything else numeric goes in — 66 numeric and 15 embedded
+columns at 10k. Missing values are imputed to the **population median, never to zero**: zero is a
+real salary and a real allowance count, and imputing to it invents an outlier where the record is
+merely incomplete. Columns are centred on the median and scaled by the MAD for the same reason
+layer 2 uses them — the mean and σ of a column are moved by exactly the records this layer exists
+to find.
+
+**The graph promise is measured, not asserted.** Candidates come from a DuckDB self-join;
+`networkx` resolves components over those edges only. At 10k that graph has **30 nodes out of
+10,000**, and the phase gate fails if the linked set ever exceeds 5% of the population. Manager
+cycles work the same way: the feature build's `manager_cycle_flag` is computed set-based by a
+recursive CTE, and only those employees and their chains — bounded by `max_cycle_length` — become
+the directed subgraph `networkx` searches.
+
+**One classifier decides three outcomes.** A shared-account component is `spousal` (no finding at
+all), `near_duplicate` (C06) or `unrelated` (C01), and the decision is made once, over the whole
+component, in `build_components`. This is the only place in the system where "not a finding" and
+"a different finding" are different answers, and it is what leaves `spousal_shared_iban` alone
+without a threshold. **A component is excluded only when every pair in it is explained** — a
+three-person ring containing one married couple is still a ring.
+
+**Jaro-Winkler is written out rather than depended on.** Thirty lines against a package, for a
+function that runs over the handful of pairs that already share a date of birth *and* a bank
+account. The blocking step has reduced the problem before the comparison starts, so it is never on
+a hot path, and the arithmetic is fixed by the definition rather than by a library's version.
+
+**CUDA is confirmed and the CPU path is proved.** `device: auto` in the pack resolves to what the
+machine has; the phase-5 gate asserts the run used CUDA *and* refits the same network on CPU over a
+slice of the matrix, because the machine that would find a hard CUDA dependency is the one nobody
+runs the suite on.
+
+Three detectors diverge from the catalogue's first statement of them, each documented in
+`docs/ANOMALY_CATALOG.md` in the same session:
+
+- **C03 does not require an empty assignment history**, and does require the silence to sit
+  **before any termination date**. The injected ghosts carry a full career history like anybody
+  else, so the first condition would have found none of them; and an employee still paid after
+  their leaving date stops badging in for a reason C04 already owns, so without the second this
+  detector reports every leaver twice.
+- **C02 carries the record's own pay stream as its financial impact**, `estimated`, rather than the
+  zero the injector records. One of the duplicated streams is going to stop, and an alert with no
+  money on it sorts to the bottom of a queue ranked by exposure.
+- **C05 is dated from the self-approved record to the last month paid**, and takes two description
+  templates rather than one. A signature on a record and a reporting line that closes on itself are
+  one code and nothing like one sentence.
+
+**Runtime at 10k**: layer 3 in ~7.6s for 28 findings, of which ~6.3s is the autoencoder (60 epochs
+over 10,000 rows on CUDA), 0.5s the isolation forest and 0.3s the whole graph pass. The five
+detectors together cost under 0.1s: each is a single DuckDB query over tables the preparation step
+already built.
 
 ## Layer 4 — fusion and evidence (phase 6)
 

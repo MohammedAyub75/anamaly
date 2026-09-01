@@ -64,13 +64,17 @@ def test_unaccounted_findings_stay_rare(evaluation) -> None:
     assert evaluation.unlabelled_hits / raised <= 0.02
 
 
-def test_pending_codes_are_reported_not_hidden(evaluation) -> None:
-    """All 34 codes appear; those without a detector say which phase owns them."""
+def test_every_code_has_a_detector(evaluation) -> None:
+    """All 34 codes appear, and after phase 5 none of them is still waiting.
+
+    Until phase 5 this asserted the opposite -- that the five unbuilt codes said
+    which phase owned them, so a missing detector read as "not built" rather
+    than as a silent failure. There is nothing left to be pending, and the
+    stronger assertion is now the useful one.
+    """
     assert len(evaluation.codes) == 34
-    pending = {row.code for row in evaluation.pending}
-    assert pending == {"C01", "C02", "C03", "C05", "C06"}
-    for row in evaluation.pending:
-        assert "phase" in row.detector, row.code
+    assert not evaluation.pending, sorted(row.code for row in evaluation.pending)
+    assert len(evaluation.implemented) == 34
 
 
 def test_confounders_are_left_alone(evaluation) -> None:

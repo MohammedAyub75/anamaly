@@ -29,6 +29,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -963,6 +964,268 @@ def verify_4() -> int:
     return gate.report()
 
 
+def verify_5() -> int:
+    """Phase-5 gate: layer 3 -- isolation forest, autoencoder, graph checks.
+
+    The spec's claim for this phase is family C/D recall at or above 75% and a
+    confirmed CUDA path.  Everything else here exists to stop that claim being
+    true by accident: that the graph search really is walking a candidate
+    subgraph rather than the workforce, that the spousal accounts and the
+    quiet field roles are still left alone, that the CPU path a machine without
+    a GPU depends on actually runs, that the models rank the injected set above
+    the rest of the population rather than scoring everybody the same, and that
+    nothing layer 3 writes needs a data scientist to read.
+    """
+    _add_service_paths()
+    from detector.config import DetectorConfig, LakeError
+    from detector.eval import harness, report
+    from detector.features.build import build
+    from detector.lake import connect
+    from detector.layers.l1_rules import RuleSet, run_rules
+    from detector.layers.l2_peer import run_peer
+    from detector.layers.l3_graph import DETECTORS, L3Error, find_cycles, run_l3
+    from detector.layers.l3_ml import MLError, build_matrix, train_autoencoder
+    from detector.policy import DetectorPolicy
+    from detector.run import rule_digest
+
+    gate = Gate(5, PHASE_TITLES[5])
+    policy = DetectorPolicy.load(ROOT / "policy")
+
+    try:
+        cfg = DetectorConfig.build(
+            "10k", run_id="verify-5",
+            lake=ROOT / "data" / "raw",
+            features=ROOT / "data" / "features",
+            runs=ROOT / "data" / "runs",
+        )
+    except LakeError as exc:
+        gate.check("lake present", False, str(exc)[:90])
+        return gate.report()
+
+    # ----------------------------------------------------------- the pack
+    expected_codes = {"C01", "C02", "C03", "C05", "C06"}
+    configured = set(policy.graph_codes)
+    gate.check("graph detectors present",
+               configured == expected_codes == set(DETECTORS),
+               f"{len(configured)} codes, every code the catalogue leaves to "
+               "phase 5"
+               if configured == expected_codes
+               else f"missing={sorted(expected_codes - configured)}")
+    disabled = sorted(c for c, v in policy.graph_codes.items()
+                      if not v.get("enabled", True))
+    gate.check("every detector enabled", not disabled,
+               "a disabled detector is a silent 0% recall row"
+               if not disabled else f"disabled={disabled}")
+    gate.check("contamination is set, not 'auto'",
+               isinstance(policy.isolation_forest["contamination"], (int, float)),
+               f"{policy.isolation_forest['contamination'] * 100:.1f}% expected "
+               "anomaly rate, from the catalogue's own estimate and never from "
+               "the injected counts")
+
+    # ------------------------------------------------------------- layers
+    build(cfg, policy)
+    ruleset = RuleSet.load(ROOT / "policy")
+    con = connect(cfg, features=True)
+    try:
+        l1 = run_rules(con, ruleset)
+        l2 = run_peer(con, policy)
+        try:
+            l3 = run_l3(con, policy)
+            again = run_l3(con, policy)
+            l3_error = ""
+        except (L3Error, MLError) as exc:
+            l3, again, l3_error = None, None, str(exc)[:90]
+        matrix = build_matrix(con, policy) if l3 else None
+    finally:
+        con.close()
+    if l3 is None or again is None:
+        gate.check("layer 3 runs", False, l3_error)
+        return gate.report()
+
+    ml = l3.ml
+    graph = l3.graph
+    gate.check("model matrix built",
+               matrix is not None and matrix.rows == cfg.employees,
+               f"{matrix.rows:,} employees x {matrix.features} features "
+               f"({len(matrix.numeric_names)} numeric, "
+               f"{len(matrix.categorical_names)} embedded)"
+               if matrix else "not built")
+    gate.check("both models fitted", ml is not None and ml.trained,
+               f"isolation forest {ml.forest_seconds:.2f}s, autoencoder "
+               f"{ml.autoencoder_seconds:.2f}s over {ml.epochs} epochs"
+               if ml else "not fitted")
+
+    # The spec's own words: CUDA confirmed, and the CPU path must work. Both
+    # halves are checked, because a machine without a GPU is a supported
+    # deployment and a hard CUDA dependency would only be found there.
+    gate.check("CUDA path confirmed", ml.cuda_available and ml.used_cuda,
+               f"trained on `{ml.device}`"
+               if ml.used_cuda
+               else f"cuda available={ml.cuda_available}, trained on {ml.device}")
+    cpu_started = time.perf_counter()
+    try:
+        small = _slice_matrix(matrix, 2000)
+        gap, _above, cpu_device, _loss, _epochs = train_autoencoder(
+            small, {**policy.autoencoder, "epochs": 2}, device="cpu"
+        )
+        cpu_ok = cpu_device == "cpu" and gap.shape == (small.rows, small.features)
+    except Exception as exc:  # noqa: BLE001 - the gate reports, it does not raise
+        cpu_ok, cpu_device = False, f"{type(exc).__name__}: {exc}"[:60]
+    gate.check("CPU path works", cpu_ok,
+               f"the same net fits on cpu in {time.perf_counter() - cpu_started:.1f}s "
+               "-- slower is fine, a hard CUDA dependency is not"
+               if cpu_ok else str(cpu_device))
+
+    # ------------------------------------------------------------- graph
+    gate.check("graph stays a candidate subgraph",
+               graph.graph_nodes < cfg.employees * 0.05,
+               f"{graph.graph_nodes:,} linked employees of {cfg.employees:,} "
+               f"in {graph.components} components, largest "
+               f"{graph.largest_component} -- networkx never sees the workforce")
+    gate.check("components are classified",
+               sum(graph.by_class.values()) == graph.components
+               and set(graph.by_class) <= {"unrelated", "spousal", "near_duplicate"},
+               ", ".join(f"{name} {count}"
+                         for name, count in sorted(graph.by_class.items()))
+               + " -- a declared joint account is not a finding and a shared "
+                 "date of birth is C06, not a suppressed C01")
+    cycles = find_cycles([("a", "b"), ("b", "c"), ("c", "a"), ("d", "a")], 6)
+    gate.check("cycle detection works",
+               cycles == [["a", "b", "c"]],
+               f"{graph.cycles_found} cycles in this lake and "
+               f"{graph.cycle_candidates} candidates, so the finder is checked "
+               "against a known chain instead")
+
+    gate.check("layer 3 under 120s", l3.seconds < 120,
+               f"{l3.total} findings in {l3.seconds:.2f}s")
+    gate.check("layer 3 is deterministic",
+               again.by_code == l3.by_code
+               and [h["description"] for h in again.hits]
+                   == [h["description"] for h in l3.hits],
+               "a second pass finds the same cases with the same wording")
+
+    # ---------------------------------------------------------------- eval
+    scored = harness.evaluate(
+        cfg, ruleset, l1, l2, l3,
+        runtime={"l1": l1.seconds, "l2": l2.seconds, "l3": l3.seconds},
+        policy_digest=policy.digest,
+        rule_digest=rule_digest(ruleset),
+    )
+    path = report.write(scored, ROOT / report.REPORT_PATH)
+    by_code = {row.code: row for row in scored.codes}
+
+    for code in sorted(expected_codes):
+        row = by_code.get(code)
+        gate.check(
+            f"{code} l3",
+            bool(row) and row.recall == 1.0 and (row.precision or 0) >= 0.75,
+            f"{row.injected} injected, {row.detected} found, {row.hits} raised, "
+            f"{_rate(row.precision)} precision, {_rate(row.window_rate)} window"
+            if row else "no eval row",
+        )
+
+    recall_c = scored.family_recall("C")
+    recall_d = scored.family_recall("D")
+    gate.check("family C recall >= 75%", (recall_c or 0) >= 0.75,
+               f"{_rate(recall_c)} across all 8 codes -- the phase-5 gate")
+    gate.check("family D recall >= 75%", (recall_d or 0) >= 0.75,
+               f"{_rate(recall_d)} across all 7 codes")
+    gate.check("family C precision", (scored.family_precision("C") or 0) >= 0.90,
+               f"{_rate(scored.family_precision('C'))} -- an identity finding "
+               "names records, so a false one is a bug rather than a judgement")
+
+    separation = scored.ml
+    gate.check("the models rank the injected set high",
+               separation is not None and separation.lift >= 2.0,
+               f"{_rate(separation.top_decile_recall)} of injected employees "
+               f"are in the top tenth ({separation.lift:.1f}x a random tenth); "
+               f"median {separation.labelled_median:.0f} against "
+               f"{separation.population_median:.0f} for the population"
+               if separation else "not scored")
+
+    # -------------------------------------------------------- the evidence
+    bundles = [json.loads(h["evidence_json"]) for h in l3.hits]
+    linked = [b for b in bundles if b.get("graph_context")]
+    named = [b for b in linked
+             if b["graph_context"].get("related_employees")
+             and b["graph_context"].get("link_value_masked")]
+    gate.check("graph evidence names the other records",
+               bool(linked) and len(named) == len(linked),
+               f"{len(named)}/{len(linked)} linked findings list every employee "
+               "on the account or the identity number -- a link the reviewer "
+               "cannot see the other end of is not evidence")
+    unmasked = [
+        b for b in linked
+        if len(str(b["graph_context"].get("link_value_masked") or "")) > 6
+    ]
+    gate.check("identifiers are masked", not unmasked,
+               f"{len(linked)} findings quote the last "
+               f"{policy.graph['mask_visible_digits']} digits only",
+               )
+    attributed = [b for b in bundles if b.get("feature_attributions")]
+    gate.check("ghost findings carry a model attribution", bool(attributed),
+               f"{len(attributed)} findings name the columns the models could "
+               "not account for")
+
+    jargon = sorted({
+        word
+        for h in l3.hits
+        for text in [h["description"], *h["recommended_actions"]]
+        for word in _jargon(text)
+    })
+    gate.check("no ML jargon reaches the reviewer", not jargon,
+               f"{len(l3.hits)} descriptions and their actions, against "
+               f"{len(ML_JARGON)} banned terms"
+               if not jargon else f"found={jargon}")
+
+    critical = [c for c in scored.confounders if c.flagged_critical]
+    own_code = [c for c in scored.confounders if c.flagged_by_its_code]
+    gate.check("confounders not flagged", not critical and not own_code,
+               f"{len(scored.confounders)} types, "
+               f"{sum(c.planted for c in scored.confounders)} employees, none "
+               "flagged by the code they exist to test -- including the "
+               "spousal accounts and the quiet field roles this phase owns"
+               if not critical and not own_code
+               else f"critical={[c.confounder_type for c in critical]}, "
+                    f"own_code={[c.confounder_type for c in own_code]}")
+
+    gate.check("layers 1 and 2 have not regressed",
+               scored.family_recall("A") == 1.0
+               and scored.family_precision("A") == 1.0
+               and (scored.family_recall("B") or 0) >= 0.85,
+               f"family A still {_rate(scored.family_recall('A'))} recall and "
+               f"{_rate(scored.family_precision('A'))} precision; family B "
+               f"{_rate(scored.family_recall('B'))} recall over "
+               f"{l1.total + l2.total} findings")
+    gate.check("every code has a detector", not scored.pending,
+               f"{len(scored.implemented)}/34 codes -- the eval report has no "
+               "'not built' row left")
+    gate.check("no zero-recall detector", not scored.zero_recall,
+               f"{len(scored.implemented)} detectors, none finding nothing")
+    gate.check("eval report written", path.exists(),
+               f"{report.REPORT_PATH}, 34 code rows, sections 2b and 2c")
+
+    return gate.report()
+
+
+def _slice_matrix(matrix, rows: int):
+    """The first `rows` of a feature matrix -- the CPU-path check runs small.
+
+    Proving the CPU path means proving the same net builds and trains without
+    CUDA, not paying for a second full fit inside a phase gate.
+    """
+    from dataclasses import replace
+
+    take = min(rows, matrix.rows)
+    return replace(
+        matrix,
+        employees=matrix.employees[:take],
+        numeric=matrix.numeric[:take],
+        categorical=matrix.categorical[:take],
+        values={name: column[:take] for name, column in matrix.values.items()},
+    )
+
+
 def _rate(value: float | None) -> str:
     return "--" if value is None else f"{value * 100:.0f}%"
 
@@ -987,6 +1250,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return verify_3()
     if phase == 4:
         return verify_4()
+    if phase == 5:
+        return verify_5()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)
@@ -1075,7 +1340,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
     p.add_argument("--run-id", default=None)
     p.add_argument("--stages", default=None,
-                   help="comma-separated subset of features,l1,l2")
+                   help="comma-separated subset of features,l1,l2,l3")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_detect)
 

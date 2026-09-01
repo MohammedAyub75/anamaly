@@ -238,9 +238,13 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
 - **Injection**: assign one IBAN to 2–3 employees in different org units, with different surnames
   and different dates of birth.
 - **Detection**: connected components over `fact_bank_account`, over time, not just current rows.
-  Two exclusions, each of which is a *different* finding rather than a false positive: a couple who
-  each declare the other as their spouse (the planted confounder), and a pair sharing a date of
-  birth and a near-identical name, which is one person on the payroll twice — **C06**.
+  Candidates are a DuckDB self-join; `networkx` resolves the components and never sees an employee
+  who shares nothing with anybody. Two exclusions, each of which is a *different* finding rather
+  than a false positive: a couple who each declare the other as their spouse (the planted
+  confounder), and a pair sharing a date of birth and a near-identical name, which is one person on
+  the payroll twice — **C06**. **A component is excluded only when *every* pair in it is
+  explained**, not when some pair is: a three-person ring containing one married couple is still a
+  ring, and accounting for two of its three links says nothing about the third.
 - **Evidence**: the IBAN (masked), every employee on it, their org units, total monthly disbursement.
 - **Actions**: **hold payroll** on the account; verify identity documents; escalate to investigation.
 - **Confounder**: spousal shared accounts (`is_known_benign_share = true`, same surname, declared
@@ -249,7 +253,13 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
 ### C02 — Duplicate national ID or iqama number
 **Severity** CRITICAL · **Rate** 0.03% · **Detector** L3 graph
 - **Injection**: reuse one `national_id`/`iqama_no` across 2–3 employee records.
-- **Detection**: group-by count > 1 on each identifier.
+- **Detection**: group-by count > 1 on each identifier, resolved into components the same way C01's
+  accounts are, so a record linked by a national ID to one employee and by an iqama to another is
+  one finding rather than two. Every record in the group is raised: which of them is the real
+  person is the reviewer's question, and the action says so — hold all but the one whose documents
+  check out. The financial impact carried is **the record's own pay stream**, `estimated`, rather
+  than the zero the injector records: one of these streams is going to stop, and an alert with no
+  money on it sorts to the bottom of a queue ranked by exposure.
 - **Evidence**: the identifier (masked), the duplicate records, hire dates, both pay streams.
 - **Actions**: hold payroll on all but the verified record; escalate.
 
@@ -257,8 +267,16 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
 **Severity** CRITICAL · **Rate** 0.02% · **Detector** L3 (ML + rules)
 - **Injection**: an employee paid every month with zero badge swipes, zero ERP logins, zero leave
   variance, and no assignment history after hire.
-- **Detection**: `activity_score ≈ 0` for ≥ 6 consecutive periods AND paid AND no assignment rows;
-  the autoencoder's reconstruction error corroborates.
+- **Detection**: zero badge swipes, zero ERP logins and zero `activity_score` for ≥ 6 **consecutive**
+  paid periods, **before any termination date**. Two corrections to the first statement of this
+  line, both from what the injector actually writes. The absence of assignment rows is *not* a
+  condition: the injected ghosts carry a full career history like anybody else, and requiring an
+  empty one would have found none of them. And the run must sit before termination, because an
+  employee still paid after their leaving date stops badging in for a reason that already has a
+  code — **C04** — and without the exclusion this detector reports every leaver a second time.
+  The two unsupervised models corroborate rather than trigger: where they also put the record at
+  the top of the workforce the finding says so, and where they do not, a dormancy this long is
+  still a fact. A model that stayed quiet must never be the reason a ghost is not raised.
 - **Evidence**: 24-month activity series, payroll series, empty assignment history, cumulative paid.
 - **Actions**: **hold payroll immediately**; physical verification through the line manager; escalate.
 - **Confounder**: genuinely low-activity roles (long-term sick leave, field staff without ERP
@@ -276,8 +294,12 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
 **Severity** HIGH · **Rate** 0.02% · **Detector** L3 graph
 - **Injection**: set `approved_by = employee_id` on an assignment row, or create a 2–4 node cycle in
   `manager_id`.
-- **Detection**: `networkx` cycle detection over the manager graph (small candidate subgraph only);
-  direct equality test for self-approval.
+- **Detection**: `networkx` cycle detection over the manager graph (small candidate subgraph only —
+  the employees the feature build's `manager_cycle_flag` marks, plus their chains up to
+  `max_cycle_length`); direct equality test for self-approval. The finding is dated from the period
+  of the self-approved record to the last month paid, because what a reviewer works is the money
+  that has been paid on the strength of that signature. Both routes are one code and neither
+  sentence fits the other, so `policy/graph_ml.yaml` carries a template for each.
 - **Evidence**: the cycle path or the self-approved record, the value approved.
 - **Actions**: void the approval; correct the hierarchy; review everything that approver signed.
 
@@ -287,7 +309,12 @@ Rare, high severity, mostly graph- or set-based. Phase-5 gate: **recall ≥ 75%*
   the same date of birth, the same IBAN, and a name differing by a single transposition. Two real
   records rather than a manufactured clone, so both pay streams, both careers and both attendance
   histories are genuine.
-- **Detection**: blocking on DOB + IBAN, then Jaro-Winkler on `name_en_normalised` ≥ 0.90.
+- **Detection**: blocking on DOB + IBAN, then Jaro-Winkler on `name_en_normalised` ≥ 0.90. **Both
+  records are raised**, not just the newer one: the detector cannot know which of two real careers
+  is the duplicate, and the action — hold the newer record's payroll — names it from the hire dates
+  rather than asserting it. What the reviewer is told is the **edit distance**, not the similarity:
+  "the names differ by two letters" is a fact about the records, where "0.94" is a fact about the
+  comparison.
 - **Evidence**: both records side by side with the differing fields highlighted, both pay streams.
 - **Actions**: hold the newer record's payroll; verify documents; merge or terminate.
 

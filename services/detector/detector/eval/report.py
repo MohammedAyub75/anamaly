@@ -189,6 +189,63 @@ def render(report: EvalReport) -> str:
             )
             add("")
 
+    # ---------------------------------------------------------------- 2c
+    if report.graph is not None or report.ml is not None:
+        add("## 2c. What layer 3 looked at")
+        add("")
+    if report.graph is not None:
+        graph = report.graph
+        add(
+            "The graph checks find their candidates set-based in DuckDB and "
+            "hand only the candidate subgraphs to `networkx`. The number that "
+            "matters here is **linked employees**: that is the size of the "
+            "graph actually held in memory, and it must stay a tiny fraction "
+            "of the workforce at every scale."
+        )
+        add("")
+        add("| | Count |")
+        add("|---|---:|")
+        add(f"| Employees sharing a bank account or an identity number "
+            f"| {graph.graph_nodes:,} |")
+        add(f"| Components resolved | {graph.components:,} |")
+        add(f"| Largest component | {graph.largest_component:,} |")
+        for name in sorted(graph.by_class):
+            add(f"| — classified `{name}` | {graph.by_class[name]:,} |")
+        add(f"| Manager-cycle candidates walked | {graph.cycle_candidates:,} |")
+        add(f"| Manager cycles found | {graph.cycles_found:,} |")
+        add(f"| Self-approved assignment records | {graph.self_approvals:,} |")
+        add("")
+        add(
+            "A component classified `spousal` or `near_duplicate` is not a "
+            "false positive suppressed by a threshold — each is a *different* "
+            "finding: a declared joint account is no finding at all, and a "
+            "shared account with a shared date of birth is C06 rather than C01."
+        )
+        add("")
+    if report.ml is not None:
+        ml = report.ml
+        add(
+            "The two unsupervised models produce no anomaly code, so they "
+            "cannot appear in the recall table above — but *\"it scored "
+            "everybody the same\"* is exactly the failure that table catches "
+            "for a rule, so it is measured here instead. **Top-decile recall** "
+            "is what a reviewer would meet if they worked only the top tenth "
+            "of the model ranking and nothing else."
+        )
+        add("")
+        add("| | Value |")
+        add("|---|---:|")
+        add(f"| Employees scored | {ml.scored:,} |")
+        add(f"| Features in the matrix | {ml.features} |")
+        add(f"| Expected anomaly rate used | {ml.contamination * 100:.1f}% |")
+        add(f"| Device | `{ml.device}` |")
+        add(f"| Median score, injected employees | {ml.labelled_median:.1f} |")
+        add(f"| Median score, whole population | {ml.population_median:.1f} |")
+        add(f"| Recall in the top 10% | {_pct(ml.top_decile_recall)} |")
+        add(f"| Recall in the top 1% | {_pct(ml.top_percent_recall)} |")
+        add(f"| Lift over a random tenth | {ml.lift:.1f}× |")
+        add("")
+
     # ---------------------------------------------------------------- 3
     add("## 3. Precision at depth")
     add("")
@@ -275,6 +332,8 @@ def summary_rows(report: EvalReport) -> list[tuple[str, str]]:
         ("family A precision", _pct(report.family_precision("A"))),
         ("family B recall", _pct(report.family_recall("B"))),
         ("family B precision", _pct(report.family_precision("B"))),
+        ("family C recall", _pct(report.family_recall("C"))),
+        ("family D recall", _pct(report.family_recall("D"))),
         ("precision@100", _pct(report.precision_at.get(100))),
         ("findings raised", f"{sum(c.hits for c in report.codes):,}"),
         ("unaccounted findings", f"{report.unlabelled_hits:,}"),

@@ -263,6 +263,40 @@ class DetectorPolicy:
         )
         return f"CASE {rating} {whens} ELSE NULL END"
 
+    # ------------------------------------------------------- layer 3 (graph)
+
+    @property
+    def graph_ml(self) -> dict:
+        """`policy/graph_ml.yaml`: the layer-3 matrix, models and graph dials."""
+        return self.pack.graph_ml
+
+    @property
+    def matrix(self) -> dict:
+        return self.graph_ml["matrix"]
+
+    @property
+    def isolation_forest(self) -> dict:
+        return self.graph_ml["isolation_forest"]
+
+    @property
+    def autoencoder(self) -> dict:
+        return self.graph_ml["autoencoder"]
+
+    @property
+    def graph(self) -> dict:
+        return self.graph_ml["graph"]
+
+    @cached_property
+    def graph_codes(self) -> dict[str, dict]:
+        return dict(self.graph_ml["codes"])
+
+    def graph_threshold(self, code: str, name: str) -> float:
+        """One code's dial. Missing is a bug in the pack, not a default to guess."""
+        thresholds = self.graph_codes[code].get("thresholds") or {}
+        if name not in thresholds:
+            raise KeyError(f"graph_ml.yaml: codes.{code}.thresholds.{name} is missing")
+        return float(thresholds[name])
+
     def allowance_label_case(self, column: str = "allowance_code") -> str:
         """Allowance code -> display name, as SQL. No raw code reaches a reviewer."""
         whens = " ".join(

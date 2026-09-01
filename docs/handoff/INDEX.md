@@ -14,7 +14,7 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 | 2 | `datagen` pass 2 — 34 anomaly codes injected + `labels_anomaly` + 7 confounder types | ✅ PASSED | `verify 2` — 44/44 checks, 34/34 codes at 100% agreement | 2026-08-31 | `phase-02` |
 | 3 | Feature build + Layer 1 rule engine + eval harness | ✅ PASSED | `verify 3` — 34/34 checks, 17/17 layer-1 codes at 100% recall and precision | 2026-09-01 | `phase-03` |
 | 4 | Layer 2 peer stats + expected-salary model + SHAP | ✅ PASSED | `verify 4` — 31/31 checks, 12/12 layer-2 codes at 100% recall, family B precision 99% | 2026-09-01 | `phase-04` |
-| 5 | Layer 3 Isolation Forest + autoencoder + graph checks | ⬜ not started | `verify 5` | — | — |
+| 5 | Layer 3 Isolation Forest + autoencoder + graph checks | ✅ PASSED | `verify 5` — 30/30 checks, 5/5 layer-3 codes at 100% recall and precision, 34/34 codes now have a detector | 2026-09-01 | `phase-05` |
 | 6 | Fusion, severity banding, evidence bundle, financial impact | ⬜ not started | `verify 6` | — | — |
 | 7 | Scale-up 100k → 1M, batch tuning, `agg_alerts_by_site_month` | ⬜ not started | `verify 7` | — | — |
 | 8 | Postgres schema + FastAPI backend + auth + audit + geo endpoint | ⬜ not started | `verify 8` | — | — |
@@ -27,13 +27,15 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 
 ## Next session
 
-Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_04.md`. Implement phase 5 — layer 3:
-isolation forest, the tabular autoencoder and the graph checks. First command:
+Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_05.md`. Implement phase 6 — layer 4:
+fusion, severity banding, the evidence bundle and financial impact. First command:
 
 ```
-python tasks.py verify 4
+python tasks.py verify 5
 ```
 
-(confirms the feature store, both detection layers and the harness are intact before building the
-layer that joins them). The five codes still at 0% recall in `docs/EVAL_REPORT.md` are the work:
-C01, C02, C03, C05 and C06 — four of the five graph-shaped.
+(confirms the feature store, all three detection layers and the harness are intact before building
+the layer that combines them). There are no zero-recall codes left: all 34 have a detector, and the
+work is now turning 353 findings across three layers into a queue a reviewer can actually work —
+score fusion, an auto-tuned alert budget, and collapsing repeated and related findings into one
+case.

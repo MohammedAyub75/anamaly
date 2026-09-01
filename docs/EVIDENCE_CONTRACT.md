@@ -69,6 +69,19 @@ alongside the alert row, and returned verbatim by `GET /alerts/{id}`.
     "percentile": 99.4, "robust_z": 4.3
   },
 
+  "graph_context": {
+    "link_type": "shared_iban",
+    "link_value_masked": "4281",
+    "component_size": 3,
+    "component_class": "unrelated",
+    "total_monthly_disbursement": 75637.0,
+    "related_employees": [
+      { "employee_id": "E00003043", "name_en": "Kamran Badr Khan",
+        "org_unit_name_en": "Downstream Manufacturing Section 650",
+        "site_name_en": "Khurais Field Camp", "monthly_net": 18388.42 }
+    ]
+  },
+
   "feature_attributions": [
     { "feature": "allowance_REMOTE_SITE", "label_en": "Remote-site allowance", "contribution": 0.41, "direction": "increases", "value_sar": 3200 },
     { "feature": "allowance_ratio",       "label_en": "Allowances as share of pay", "contribution": 0.22, "direction": "increases", "value_sar": null }
@@ -117,7 +130,8 @@ alongside the alert row, and returned verbatim by `GET /alerts/{id}`.
 | `reasons` | **At least one, always.** An alert with no reason is a bug — that is the whole product promise. `type` ∈ `rule`, `peer`, `ml`, `graph`, `temporal`. |
 | `reasons[].text` | Plain English, complete sentence, business terms, figures formatted with thousands separators. |
 | `peer_context` | Required when `peer_stats` contributed; null otherwise. `cohort_key` and `cohort_n` are mandatory when present — a comparison the reviewer cannot see the basis of is not evidence. |
-| `feature_attributions` | Sorted by `|contribution|` descending, max 10. `label_en` is what the UI renders; `feature` is the internal name and is never displayed. |
+| `graph_context` | Required when `graph` contributed; null otherwise. `link_value_masked` and `related_employees` are mandatory when present — a link the reviewer cannot see the other end of is not evidence. **`link_value_masked` carries the last four digits only**; the whole account or identity number never reaches the bundle, a description or an action. `component_class` ∈ `unrelated`, `spousal`, `near_duplicate` and says *why* the component is a finding: a declared joint account is no finding at all and a shared date of birth is C06, so the class is the record of a decision rather than a suppressed alert. |
+| `feature_attributions` | Sorted by `|contribution|` descending, max 10. `label_en` is what the UI renders; `feature` is the internal name and is never displayed. `direction` ∈ `increases`, `reduces`, `unexpected` — the third is for a categorical, where the model expected a different value rather than a larger or smaller one. `contribution` is in SAR where the layer that produced it works in SAR (the expected-salary model) and a share of the record's total gap where it does not (layer 3). |
 | `timeline` | Exactly the periods in the run window (24), ascending, no gaps. `flagged` marks the anomaly window. |
 | `financial_impact` | Always present. `confidence` ∈ `exact` (rule-derived), `estimated` (model-derived), `unknown`. `monthly` may be 0 for non-financial findings (e.g. A11), never null. |
 | `recommended_actions` | 1–5 imperative sentences. Specific enough to act on without further analysis. |
