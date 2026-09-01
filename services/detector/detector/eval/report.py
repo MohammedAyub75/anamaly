@@ -268,25 +268,93 @@ def render(report: EvalReport) -> str:
     add("")
 
     # ---------------------------------------------------------------- 4
-    add("## 4. Alert budget")
+    add("## 4. Alerts after fusion")
     add("")
-    add(
-        "Budget is `policy/fusion.yaml`, scaled linearly from the 1m reference. "
-        "Severity here is the severity each rule declares; the fused score and "
-        "the auto-tuned bands that decide the real severity arrive in phase 6, "
-        "so treat this section as a baseline rather than an adherence check."
-    )
-    add("")
-    add("| Severity | Findings | Budget at this scale |")
-    add("|---|---:|---:|")
-    for severity in ("CRITICAL", "HIGH", "MEDIUM"):
-        budget = report.severity_budget.get(severity)
+    if report.alerts is None:
         add(
-            f"| {severity} | {report.severity_counts.get(severity, 0):,} "
-            f"| {budget:,.0f} |" if budget is not None
-            else f"| {severity} | {report.severity_counts.get(severity, 0):,} | -- |"
+            "Layer 4 did not run. Severity below is the severity each detector "
+            "declares, which is a starting point rather than an adherence check: "
+            "the fused score and the banded queue come from `--stages fusion`."
         )
-    add("")
+        add("")
+        add("| Severity | Findings | Budget at this scale |")
+        add("|---|---:|---:|")
+        for severity in ("CRITICAL", "HIGH", "MEDIUM"):
+            budget = report.severity_budget.get(severity)
+            add(
+                f"| {severity} | {report.severity_counts.get(severity, 0):,} "
+                f"| {budget:,.0f} |" if budget is not None
+                else f"| {severity} | "
+                     f"{report.severity_counts.get(severity, 0):,} | -- |"
+            )
+        add("")
+    else:
+        queue = report.alerts
+        add(
+            f"**{queue.findings:,} findings became {queue.alerts:,} alerts** "
+            f"({queue.collapse:.2f} findings each, "
+            f"{queue.per_1000:.1f} per 1,000 employees). An alert is one "
+            "employee and one anomaly code: repeated windows of the same finding "
+            "are one case a reviewer works, not several. "
+            f"{queue.dropped_low_impact:,} finding(s) were below the money floor "
+            f"in `policy/fusion.yaml` and {queue.suppressed:,} were suppressed by "
+            "a prior dismissal -- suppressed, not deleted."
+        )
+        add("")
+        add(
+            "The budget is capacity, scaled linearly from the 1m reference: it "
+            "says how many cases a reviewer can work, and the bands are filled "
+            "from the top of the queue until the slots run out. **Precision per "
+            "band is the number a reviewer actually feels** -- a CRITICAL band "
+            "that is two-thirds right is a worse product than a MEDIUM band that "
+            "is two-thirds right, and one overall figure hides which you have."
+        )
+        add("")
+        add("| Severity | Alerts | Budget | Lowest score | Precision "
+            "| Confounders | Cumulative impact |")
+        add("|---|---:|---:|---:|---:|---:|---:|")
+        for band in ("CRITICAL", "HIGH", "MEDIUM", "WATCHLIST"):
+            budget = queue.budget.get(band)
+            add(
+                f"| {band} | {queue.by_severity.get(band, 0):,} "
+                + (f"| {budget:,.0f} " if budget else "| -- ")
+                + f"| {queue.thresholds.get(band, 0):.0f} "
+                f"| {_pct(queue.precision_by_band.get(band))} "
+                f"| {queue.confounders_by_band.get(band, 0)} "
+                f"| SAR {_sar(queue.impact_by_band.get(band, 0.0))} |"
+            )
+        add("")
+        misses = [b for b, ok in queue.within_budget.items() if not ok]
+        add(
+            ("**Within budget on every band.**" if not misses
+             else "**Outside the budget on " + ", ".join(misses) + ".**")
+            + " `Lowest score` is the score at each band boundary this run "
+            "produced; it is written into every bundle's `provenance."
+            "severity_thresholds`, so a stored alert can be checked against the "
+            "bands it was banded under rather than against today's pack."
+        )
+        add("")
+        if queue.critical_confounders:
+            add(
+                "**Planted confounders reaching CRITICAL: "
+                + ", ".join(f"`{name}`" for name in queue.critical_confounders)
+                + ".** Each is a missing exclusion, not a threshold to lower."
+            )
+        else:
+            add(
+                f"**No planted confounder reached CRITICAL** "
+                f"({queue.confounders_by_band.get('CRITICAL', 0)} of the "
+                f"{sum(queue.confounders_by_band.values())} that were alerted on "
+                "at all)."
+            )
+        add("")
+        add(
+            f"Every one of the {queue.validated:,} bundles was validated against "
+            "`evidence_v1.json` before it was written; "
+            f"{queue.corroborated:,} alert(s) carry more than one contributing "
+            "layer, which is what `corroboration_bonus` prices."
+        )
+        add("")
 
     # ---------------------------------------------------------------- 5
     add("## 5. Runtime profile")
@@ -338,4 +406,18 @@ def summary_rows(report: EvalReport) -> list[tuple[str, str]]:
         ("findings raised", f"{sum(c.hits for c in report.codes):,}"),
         ("unaccounted findings", f"{report.unlabelled_hits:,}"),
     ]
+    if report.alerts is not None:
+        queue = report.alerts
+        rows += [
+            ("alerts raised", f"{queue.alerts:,}"),
+            (
+                "queue",
+                ", ".join(
+                    f"{band} {queue.by_severity.get(band, 0)}"
+                    for band in ("CRITICAL", "HIGH", "MEDIUM", "WATCHLIST")
+                ),
+            ),
+            ("precision@CRITICAL", _pct(queue.precision_by_band.get("CRITICAL"))),
+            ("bundles validated", f"{queue.validated:,}"),
+        ]
     return rows

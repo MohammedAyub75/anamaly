@@ -25,6 +25,7 @@ from detector.lake import connect, connect_labels
 from detector.layers.l1_rules import RuleSet, run_rules
 from detector.layers.l2_peer import run_peer
 from detector.layers.l3_graph import run_l3
+from detector.layers.l4_fusion import run_fusion
 from detector.policy import DetectorPolicy
 
 SCALE = "10k"
@@ -103,6 +104,30 @@ def l3(con, policy: DetectorPolicy):
 
 
 @pytest.fixture(scope="session")
-def evaluation(cfg: DetectorConfig, ruleset: RuleSet, l1, l2, l3,
+def ml_scores(l3) -> dict[str, float]:
+    """Layer 3's per-employee score, the input fusion weights as the models."""
+    if l3.ml is None or l3.ml.table is None:
+        return {}
+    return {
+        str(row["employee_id"]): float(row["ml_score"])
+        for row in l3.ml.table.to_pylist()
+    }
+
+
+@pytest.fixture(scope="session")
+def l4(con, cfg: DetectorConfig, policy: DetectorPolicy, l1, l2, l3, ml_scores):
+    """One layer-4 pass: the fused, banded, validated queue."""
+    return run_fusion(
+        con, cfg, policy,
+        l1_hits=l1.hits, l2_hits=l2.hits, l3_hits=l3.hits, ml_scores=ml_scores,
+    )
+
+
+@pytest.fixture(scope="session")
+def evaluation(cfg: DetectorConfig, ruleset: RuleSet, l1, l2, l3, l4,
                policy: DetectorPolicy):
-    return harness.evaluate(cfg, ruleset, l1, l2, l3, policy_digest=policy.digest)
+    """One scored run, all four layers. The queue is part of what is evaluated:
+    a detector can have perfect recall and still bury the five things that
+    matter under three hundred that do not."""
+    return harness.evaluate(cfg, ruleset, l1, l2, l3, l4,
+                            policy_digest=policy.digest)

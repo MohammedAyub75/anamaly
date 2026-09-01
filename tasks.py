@@ -1230,6 +1230,336 @@ def _rate(value: float | None) -> str:
     return "--" if value is None else f"{value * 100:.0f}%"
 
 
+def verify_6() -> int:
+    """Phase-6 gate: fusion, severity banding, the evidence bundle, impact.
+
+    The spec's claim for this phase is two sentences: bundles validate, and the
+    alert budget lands within +/-20%.  Everything else here exists to stop those
+    being true by accident -- that an alert is the case a reviewer works rather
+    than one row per finding, that a broken policy clause can never be averaged
+    away by a quiet model, that the bands still separate a real finding from a
+    planted look-alike once the budget has decided how many of each there may
+    be, that an alert keeps its identity between runs, and that a dismissal
+    hides a finding without deleting it.
+    """
+    _add_service_paths()
+    from detector.config import DetectorConfig, LakeError
+    from detector.eval import harness, report
+    from detector.evidence.builder import EvidenceError, validate
+    from detector.features.build import build
+    from detector.lake import connect
+    from detector.layers.l1_rules import RuleSet, run_rules
+    from detector.layers.l2_peer import run_peer
+    from detector.layers.l3_graph import run_l3
+    from detector.layers.l4_fusion import L4Error, band_of, run_fusion
+    from detector.policy import DetectorPolicy
+    from detector.run import ALERT_SCHEMA, rule_digest, write_alerts
+
+    gate = Gate(6, PHASE_TITLES[6])
+    policy = DetectorPolicy.load(ROOT / "policy")
+
+    try:
+        cfg = DetectorConfig.build(
+            "10k", run_id="verify-6",
+            lake=ROOT / "data" / "raw",
+            features=ROOT / "data" / "features",
+            runs=ROOT / "data" / "runs",
+        )
+    except LakeError as exc:
+        gate.check("lake present", False, str(exc)[:90])
+        return gate.report()
+
+    # ------------------------------------------------------------- the pack
+    weights = policy.layer_weights
+    gate.check("every layer is weighted",
+               set(weights) == {"rules", "peer_stats", "ml_unsupervised", "graph"},
+               ", ".join(f"{k} {v:g}" for k, v in weights.items())
+               + " -- a rule is a fact, the rest are opinions")
+    ruleset = RuleSet.load(ROOT / "policy")
+    all_codes = set(policy.code_layer) | set(ruleset.codes)
+    gate.check("every code reaches a layer", len(all_codes) == 34,
+               f"{len(all_codes)}/34 codes map to one of the four contributors")
+    bands = policy.severity_bands
+    ordered = [bands["CRITICAL"], bands["HIGH"], bands["MEDIUM"]]
+    gate.check("severity bands are ordered", ordered == sorted(ordered, reverse=True),
+               f"CRITICAL {bands['CRITICAL']:g} > HIGH {bands['HIGH']:g} > "
+               f"MEDIUM {bands['MEDIUM']:g}, and the budget fills them from the top")
+    budget = {
+        "CRITICAL": cfg.scaled(float(policy.alert_budget["critical"])),
+        "HIGH": cfg.scaled(float(policy.alert_budget["high"])),
+    }
+    gate.check("budget scales from the 1m reference", budget["CRITICAL"] > 0,
+               f"{budget['CRITICAL']:.0f} CRITICAL and {budget['HIGH']:.0f} HIGH at "
+               f"{cfg.employees:,} employees, plus or minus "
+               f"{policy.alert_budget['tolerance_pct']}%")
+
+    # ------------------------------------------------------------- the run
+    build(cfg, policy)
+    con = connect(cfg, features=True)
+    try:
+        l1 = run_rules(con, ruleset)
+        l2 = run_peer(con, policy)
+        l3 = run_l3(con, policy)
+        layers = {"l1_hits": l1.hits, "l2_hits": l2.hits, "l3_hits": l3.hits,
+                  "ml_scores": _ml_scores(l3)}
+        try:
+            l4 = run_fusion(con, cfg, policy, **layers)
+            again = run_fusion(con, cfg, policy, **layers)
+            error = ""
+        except (L4Error, EvidenceError) as exc:
+            l4, again, error = None, None, str(exc)[:90]
+        # A dismissal the reviewer already worked, replayed against the same
+        # data: the finding must come back hidden rather than not come back.
+        hidden = grown = None
+        if l4:
+            worked = l4.alerts[0]
+            dismissal = {
+                "employee_id": worked.employee_id,
+                "anomaly_code": worked.anomaly_code,
+                "evidence_fingerprint": worked.evidence_fingerprint,
+                "disposition_id": "DISP-0001",
+                "runs_since": 1,
+                "cumulative_impact": worked.financial_impact_cumulative,
+            }
+            hidden = run_fusion(con, cfg, policy, dismissals=[dismissal], **layers)
+            grown = run_fusion(
+                con, cfg, policy,
+                dismissals=[{**dismissal,
+                             "cumulative_impact":
+                                 worked.financial_impact_cumulative / 2}],
+                **layers,
+            )
+    finally:
+        con.close()
+    if l4 is None or again is None:
+        gate.check("layer 4 runs", False, error)
+        return gate.report()
+
+    bundles = [json.loads(a.evidence_json) for a in l4.alerts]
+    ids = {a.alert_id for a in l4.alerts}
+
+    # -------------------------------------------------------------- the grain
+    pairs = {(a.employee_id, a.anomaly_code) for a in l4.alerts}
+    gate.check("one alert per employee and code", len(pairs) == l4.total,
+               f"{l4.findings_in} findings became {l4.total} alerts "
+               f"({l4.findings_in / l4.total:.2f} each) -- repeated windows of "
+               "one finding are one case, not several")
+    collapsed = [a for a in l4.alerts if a.findings > 1]
+    gate.check("repeated windows collapse", bool(collapsed),
+               f"{len(collapsed)} alert(s) fuse more than one window, covering "
+               f"{sum(a.findings for a in collapsed)} findings")
+    gate.check("every layer reaches the queue",
+               set(l4.by_layer) == set(weights),
+               ", ".join(f"{k} {v}" for k, v in sorted(l4.by_layer.items())))
+
+    # -------------------------------------------------------------- scoring
+    floored = [a for a in l4.alerts if "rules" in a.contributing_layers]
+    below = [a for a in floored if a.score < policy.rule_hit_floor]
+    gate.check("a broken clause is never averaged away", not below,
+               f"{len(floored)} alerts carry a rule hit, none below the floor of "
+               f"{policy.rule_hit_floor:g} -- a policy violation is a fact")
+    bad_range = [a for a in l4.alerts if not 0 <= a.score <= 100]
+    gate.check("score is 0-100", not bad_range,
+               f"{l4.total} alerts, {len({a.score for a in l4.alerts})} distinct "
+               "scores")
+    inconsistent = [
+        b for b in bundles
+        if sorted(b["contributing_layers"])
+        != sorted(k for k, v in b["layer_scores"].items() if v > 0)
+    ]
+    gate.check("contributing layers match the scores", not inconsistent,
+               "every non-zero entry in `layer_scores` is named in "
+               "`contributing_layers`, and nothing else is")
+    gate.check("corroboration is priced", l4.corroborated > 0,
+               f"{l4.corroborated} alert(s) have a second layer behind them; the "
+               "bonus is spent on the distance left to certainty, so agreement "
+               "cannot manufacture a 100")
+
+    # ------------------------------------------------------------ the bands
+    mis_banded = [
+        b for b in bundles
+        if b["score"] < b["provenance"]["severity_thresholds"].get(b["severity"], 0.0)
+    ]
+    gate.check("severity agrees with score", not mis_banded,
+               "every alert scores at or above the boundary its band was cut at, "
+               "and the boundary travels in the bundle")
+    # The budget is capacity, so it can keep an alert out of a full band. What
+    # it must never do is keep one out arbitrarily: an alert the budget pushed
+    # down has to be tied with the last one admitted, or the queue is being cut
+    # somewhere other than where the scores stop separating.
+    demoted, arbitrary = [], []
+    for bundle in bundles:
+        thresholds = bundle["provenance"]["severity_thresholds"]
+        eligible = band_of(bundle["score"], thresholds, "WATCHLIST")
+        if _band_rank(eligible) <= _band_rank(bundle["severity"]):
+            continue
+        demoted.append(bundle)
+        if bundle["score"] != thresholds.get(eligible):
+            arbitrary.append(bundle)
+    gate.check("capacity only ever breaks a tie", not arbitrary,
+               f"{len(demoted)} alert(s) were kept out of a full band, every one "
+               "of them tied on score with the last one admitted"
+               if not arbitrary
+               else f"{len(arbitrary)} cut below the boundary score")
+    for band in ("CRITICAL", "HIGH"):
+        got = l4.by_severity.get(band, 0)
+        target = budget[band]
+        gate.check(
+            f"{band} within the budget",
+            abs(got - target) <= target * policy.budget_tolerance,
+            f"{got} against a budget of {target:.0f} "
+            f"(plus or minus {target * policy.budget_tolerance:.0f}), cut at score "
+            f"{l4.thresholds.get(band, 0):.0f}",
+        )
+
+    # ---------------------------------------------------------- the bundle
+    gate.check("every bundle validates", l4.validated == l4.total,
+               f"{l4.validated}/{l4.total} against evidence_v1.json before "
+               "writing -- an invalid bundle fails the run rather than the UI")
+    broken = {k: v for k, v in bundles[0].items() if k != "reasons"}
+    try:
+        validate(broken)
+        rejects = False
+    except EvidenceError:
+        rejects = True
+    gate.check("the validator actually rejects", rejects,
+               "a bundle with its reasons removed is refused -- an unexplained "
+               "alert is the one bug this product cannot ship")
+    reasonless = [b for b in bundles
+                  if not b["reasons"]
+                  or not all(r["text"].strip() for r in b["reasons"])]
+    gate.check("every alert says why", not reasonless,
+               f"{sum(len(b['reasons']) for b in bundles)} reasons across "
+               f"{len(bundles)} alerts, none empty")
+    unpriced = [
+        b for b in bundles
+        if b["severity"] in ("CRITICAL", "HIGH")
+        and b["financial_impact"]["monthly"] is None
+    ]
+    gate.check("every serious alert carries a figure", not unpriced,
+               f"{l4.by_severity.get('CRITICAL', 0) + l4.by_severity.get('HIGH', 0)}"
+               " CRITICAL and HIGH alerts, each with a monthly exposure in SAR")
+    periods = cfg.period_list
+    bad_timeline = [
+        b for b in bundles if [row["period"] for row in b["timeline"]] != periods
+    ]
+    gate.check("the timeline is the whole window", not bad_timeline,
+               f"{len(periods)} months, ascending, no gaps -- a month with no pay "
+               "row is padded rather than missing")
+    unmasked = [
+        b for b in bundles
+        if b.get("graph_context")
+        and len(str(b["graph_context"].get("link_value_masked") or "")) > 6
+    ]
+    gate.check("identifiers stay masked", not unmasked,
+               f"{sum(1 for b in bundles if b.get('graph_context'))} linked alerts "
+               "quote the last four digits only")
+    jargon = sorted({
+        word
+        for b in bundles
+        for text in ([r["text"] for r in b["reasons"]] + b["recommended_actions"])
+        for word in _jargon(text)
+    })
+    gate.check("no ML jargon reaches the reviewer", not jargon,
+               f"{len(bundles)} bundles, their reasons and their actions, against "
+               f"{len(ML_JARGON)} banned terms"
+               if not jargon else f"found={jargon}")
+
+    # ------------------------------------------------------------- identity
+    same_ids = {a.alert_id for a in again.alerts} == ids
+    same_scores = ({(a.employee_id, a.anomaly_code, a.score, a.severity)
+                    for a in again.alerts}
+                   == {(a.employee_id, a.anomaly_code, a.score, a.severity)
+                       for a in l4.alerts})
+    gate.check("an alert keeps its identity", same_ids and same_scores,
+               "a second pass over the same data reassigns no id and moves no "
+               "score -- an alert id is what a case is filed under")
+
+    # ---------------------------------------------------------- suppression
+    print_ = l4.alerts[0].evidence_fingerprint
+    was = [a for a in hidden.alerts if a.evidence_fingerprint == print_]
+    gate.check("a dismissal hides, never deletes",
+               bool(was) and was[0].suppressed and hidden.total == l4.total,
+               f"{hidden.suppressed} suppressed, {hidden.total} alerts still "
+               "written -- a suppressed finding is filtered, not lost"
+               if was else "the dismissed finding did not come back")
+    back = [a for a in grown.alerts if a.evidence_fingerprint == print_]
+    gate.check("a larger amount resurfaces",
+               bool(back) and not back[0].suppressed,
+               "the reviewer accepted the amount they were shown; "
+               f"{policy.suppression['resurface_if_impact_increases_pct']}% more "
+               "is a new finding")
+
+    # ---------------------------------------------------------------- eval
+    scored = harness.evaluate(
+        cfg, ruleset, l1, l2, l3, l4,
+        runtime={"l1": l1.seconds, "l2": l2.seconds, "l3": l3.seconds,
+                 "fusion": l4.seconds},
+        policy_digest=policy.digest,
+        rule_digest=rule_digest(ruleset),
+    )
+    path = report.write(scored, ROOT / report.REPORT_PATH)
+    queue = scored.alerts
+    gate.check("the top of the queue is right",
+               (queue.precision_by_band.get("CRITICAL") or 0) >= 0.9,
+               f"{_rate(queue.precision_by_band.get('CRITICAL'))} precision at "
+               f"CRITICAL and {_rate(queue.precision_by_band.get('HIGH'))} at HIGH "
+               "-- these are the alerts somebody opens on Monday")
+    gate.check("no confounder reaches CRITICAL", not queue.critical_confounders,
+               f"{sum(queue.confounders_by_band.values())} planted look-alikes are "
+               "alerted on at all, none of them CRITICAL"
+               if not queue.critical_confounders
+               else f"found={queue.critical_confounders}")
+    gate.check("layers 1-3 have not regressed",
+               scored.family_recall("A") == 1.0
+               and scored.family_precision("A") == 1.0
+               and (scored.family_recall("B") or 0) >= 0.85
+               and (scored.family_recall("C") or 0) >= 0.75
+               and (scored.family_recall("D") or 0) >= 0.75,
+               f"A {_rate(scored.family_recall('A'))}, "
+               f"B {_rate(scored.family_recall('B'))}, "
+               f"C {_rate(scored.family_recall('C'))}, "
+               f"D {_rate(scored.family_recall('D'))} recall over "
+               f"{l4.findings_in} findings")
+    gate.check("every code reaches the queue", len(l4.by_code) == 34,
+               f"{len(l4.by_code)}/34 codes have at least one alert; "
+               f"{l4.dropped_low_impact} finding(s) fell below the "
+               f"SAR {policy.min_cumulative_impact:,.0f} money floor")
+
+    # --------------------------------------------------------------- output
+    alerts_path = write_alerts(cfg, l4)
+    gate.check("alerts written", _columns(alerts_path) == set(ALERT_SCHEMA),
+               f"{alerts_path.name}, {l4.total} rows x {len(ALERT_SCHEMA)} columns, "
+               "the bundle travelling in the row")
+    gate.check("layer 4 is quick", l4.seconds < 60,
+               f"{l4.total} alerts and {l4.validated} validated bundles in "
+               f"{l4.seconds:.2f}s")
+    gate.check("eval report written", path.exists(),
+               f"{report.REPORT_PATH}, section 4 now the fused queue")
+
+    return gate.report()
+
+
+def _band_rank(band: str) -> int:
+    """Worst last, so `>` means `more severe than`."""
+    order = ("WATCHLIST", "MEDIUM", "HIGH", "CRITICAL")
+    return order.index(band) if band in order else 0
+
+
+def _ml_scores(l3) -> dict[str, float]:
+    """Layer 3's per-employee score, read from the pass rather than the cache."""
+    if l3.ml is None or l3.ml.table is None:
+        return {}
+    rows = l3.ml.table.to_pylist()
+    return {str(r["employee_id"]): float(r["ml_score"]) for r in rows}
+
+
+def _columns(path) -> set[str]:
+    import polars as pl
+
+    return set(pl.read_parquet_schema(path))
+
+
 def verify_pending(phase: int) -> int:
     title = PHASE_TITLES.get(phase, "unknown phase")
     print(f"\nPhase {phase} gate — {title}")
@@ -1252,6 +1582,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return verify_4()
     if phase == 5:
         return verify_5()
+    if phase == 6:
+        return verify_6()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)
@@ -1340,7 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scale", choices=["10k", "100k", "1m"], default="10k")
     p.add_argument("--run-id", default=None)
     p.add_argument("--stages", default=None,
-                   help="comma-separated subset of features,l1,l2,l3")
+                   help="comma-separated subset of features,l1,l2,l3,fusion")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_detect)
 

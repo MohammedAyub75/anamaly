@@ -54,6 +54,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  findings -> {path}")
     if result.l3_scores_path:
         print(f"  scores   -> {result.l3_scores_path}")
+    if result.alerts_path:
+        print(f"  alerts   -> {result.alerts_path}")
     return 0
 
 
@@ -123,7 +125,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print("error: layer 1 did not run; nothing to evaluate", file=sys.stderr)
         return 2
     scored = harness.evaluate(
-        cfg, ruleset, result.l1, result.l2, result.l3,
+        cfg, ruleset, result.l1, result.l2, result.l3, result.l4,
         planned=report.PLANNED,
         runtime=result.runtime,
         policy_digest=policy.digest,

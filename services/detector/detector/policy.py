@@ -297,6 +297,94 @@ class DetectorPolicy:
             raise KeyError(f"graph_ml.yaml: codes.{code}.thresholds.{name} is missing")
         return float(thresholds[name])
 
+    # ------------------------------------------------------ layer 4 (fusion)
+
+    @property
+    def layer_weights(self) -> dict[str, float]:
+        """How much each layer's opinion is worth when they are blended."""
+        return {k: float(v) for k, v in self.fusion["layer_weights"].items()}
+
+    @property
+    def fusion_layers(self) -> tuple[str, ...]:
+        """The four contributors, in the order the evidence bundle lists them."""
+        return tuple(self.fusion["layer_weights"])
+
+    @property
+    def rule_hit_floor(self) -> float:
+        return float(self.fusion["rule_hit_floor"])
+
+    @property
+    def corroboration_bonus(self) -> dict[int, float]:
+        """Layers agreeing -> the bonus, keyed by how many of them agreed."""
+        names = {"two_layers": 2, "three_layers": 3, "four_layers": 4}
+        return {
+            names[k]: float(v)
+            for k, v in self.fusion["corroboration_bonus"].items()
+            if k in names
+        }
+
+    @property
+    def severity_bands(self) -> dict[str, float]:
+        """The configured starting point. Layer 4 tunes these to the budget."""
+        return {
+            name: float(band["min_score"])
+            for name, band in self.fusion["severity_bands"].items()
+        }
+
+    @property
+    def alert_budget(self) -> dict:
+        return self.fusion["alert_budget"]
+
+    @property
+    def budget_tolerance(self) -> float:
+        return float(self.alert_budget["tolerance_pct"]) / 100.0
+
+    @property
+    def remainder_disposition(self) -> str:
+        return str(self.alert_budget["remainder_disposition"]).upper()
+
+    @property
+    def ranking(self) -> dict:
+        return self.fusion["ranking"]
+
+    @property
+    def min_cumulative_impact(self) -> float:
+        return float(self.ranking["min_cumulative_impact_to_alert"])
+
+    @property
+    def ml_contribution_floor(self) -> float:
+        """Below this the models have not said anything about this employee.
+
+        They score every employee, so without a floor they would corroborate
+        every alert and the corroboration bonus would become a constant.
+        """
+        return float(self.fusion["layer_contribution"]["ml_unsupervised_min_score"])
+
+    def corroboration_text(self, layer: str) -> str:
+        """What a corroborating layer with no finding of its own says, in words."""
+        return " ".join(str(self.fusion["corroboration_text"][layer]).split())
+
+    @property
+    def suppression(self) -> dict:
+        return self.fusion["suppression"]
+
+    @cached_property
+    def code_layer(self) -> dict[str, str]:
+        """Anomaly code -> the `layer_weights` contributor its findings feed.
+
+        Only layer 3 needs declaring: its five codes split between the graph
+        checks and the models. Layer 1 and layer 2 codes are known from the
+        rule pack and `peer_stats.yaml`, so restating them here would be a
+        second copy of a fact that already has one home.
+        """
+        mapping = {code: "peer_stats" for code in self.peer_codes}
+        for code, config in self.graph_codes.items():
+            layer = config.get("layer")
+            if not layer:
+                raise KeyError(f"graph_ml.yaml: codes.{code}.layer is missing")
+            mapping[code] = str(layer)
+        return mapping
+
     def allowance_label_case(self, column: str = "allowance_code") -> str:
         """Allowance code -> display name, as SQL. No raw code reaches a reviewer."""
         whens = " ".join(

@@ -153,6 +153,10 @@ codes:
     regulatory_reference: "HR-PAY-004 Payment Instrument Control s.2"
     enabled: true
     metric: shared_iban
+    # Which contributor in `fusion.yaml.layer_weights` this code's
+    # findings feed. A shared account is a link; a dormant payroll
+    # record is what the models could not account for.
+    layer: graph
     impact_confidence: estimated
     thresholds: {}
     description: >
@@ -174,6 +178,10 @@ codes:
     regulatory_reference: "HR-IDN-001 Identity Verification s.1"
     enabled: true
     metric: duplicate_identity
+    # Which contributor in `fusion.yaml.layer_weights` this code's
+    # findings feed. A shared account is a link; a dormant payroll
+    # record is what the models could not account for.
+    layer: graph
     impact_confidence: estimated
     thresholds: {}
     description: >
@@ -194,6 +202,10 @@ codes:
     regulatory_reference: "HR-PAY-002 Payroll Attendance Control s.1"
     enabled: true
     metric: dormant_paid
+    # Which contributor in `fusion.yaml.layer_weights` this code's
+    # findings feed. A shared account is a link; a dormant payroll
+    # record is what the models could not account for.
+    layer: ml_unsupervised
     impact_confidence: exact
     thresholds:
       # Consecutive paid months with nothing to show for them before this is a
@@ -223,6 +235,10 @@ codes:
     regulatory_reference: "HR-GOV-003 Segregation of Duties s.1"
     enabled: true
     metric: approval_integrity
+    # Which contributor in `fusion.yaml.layer_weights` this code's
+    # findings feed. A shared account is a link; a dormant payroll
+    # record is what the models could not account for.
+    layer: graph
     impact_confidence: estimated
     thresholds: {}
     # Two ways in, and they read nothing like each other: one is a signature on
@@ -258,6 +274,10 @@ codes:
     regulatory_reference: "HR-IDN-001 Identity Verification s.3"
     enabled: true
     metric: near_duplicate_identity
+    # Which contributor in `fusion.yaml.layer_weights` this code's
+    # findings feed. A shared account is a link; a dormant payroll
+    # record is what the models could not account for.
+    layer: graph
     impact_confidence: estimated
     thresholds: {}
     description: >

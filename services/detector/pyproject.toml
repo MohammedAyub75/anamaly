@@ -13,6 +13,9 @@ dependencies = [
     "pyarrow>=17.0",
     "numpy>=2.0",
     "pyyaml>=6.0.1",
+    # Layer 4 validates every evidence bundle against evidence_v1.json before
+    # writing it, so this is a runtime dependency rather than a test one.
+    "jsonschema>=4.20",
 ]
 
 [project.scripts]
@@ -23,8 +26,12 @@ packages = [
     "detector",
     "detector.features",
     "detector.layers",
+    "detector.evidence",
     "detector.eval",
 ]
+
+[tool.setuptools.package-data]
+"detector.evidence" = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

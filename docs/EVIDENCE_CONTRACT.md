@@ -5,7 +5,16 @@ all share. Everything a reviewer sees about an alert comes from here. If a numbe
 bundle, it must not appear on screen and the LLM must not say it.
 
 The bundle is produced by layer 4 (`services/detector`, phase 6), persisted as JSONB in Postgres
-alongside the alert row, and returned verbatim by `GET /alerts/{id}`.
+alongside the alert row, and returned verbatim by `GET /alerts/{id}`. Between the detector and
+Postgres it travels in the `evidence_json` column of `data/runs/run_id=<id>/alerts.parquet`, one row
+per alert: phase 8 upserts the queue and its bundles in one pass, and thirty-five thousand small
+JSON files at 1m scale would be a directory nobody can copy.
+
+**One alert is one employee and one anomaly code.** That grain is fixed by two rules below --
+`alert_id` is stable for (employee, code, evidence fingerprint) and suppression matches on the same
+three -- and it is what collapses a detector that flagged two separate months into the one case a
+reviewer works. `anomaly_codes` and `families` are arrays because the shape must survive a future
+that fuses codes into one case; today each carries exactly one entry.
 
 ## Design rules
 
@@ -114,7 +123,9 @@ alongside the alert row, and returned verbatim by `GET /alerts/{id}`.
     "policy_digest": "sha256:9f2c…",
     "scored_at": "2026-08-31T04:12:07Z",
     "data_scale": "1m",
-    "correlation_id": "c1f0a5e2-…"
+    "correlation_id": "c1f0a5e2-…",
+    "evidence_fingerprint": "sha256:41ba…",
+    "severity_thresholds": { "CRITICAL": 99, "HIGH": 88, "MEDIUM": 55 }
   }
 }
 ```
@@ -124,7 +135,7 @@ alongside the alert row, and returned verbatim by `GET /alerts/{id}`.
 | Field | Rule |
 |---|---|
 | `alert_id` | `ALT-` + zero-padded 6 digits. Stable across runs for the same (employee, code, evidence fingerprint). |
-| `severity` | One of `CRITICAL`, `HIGH`, `MEDIUM`, `WATCHLIST`. Derived from `score` via `policy/fusion.yaml`, never set by hand. |
+| `severity` | One of `CRITICAL`, `HIGH`, `MEDIUM`, `WATCHLIST`. Derived from `score`, never set by hand. The band floors in `policy/fusion.yaml` are the bound and `alert_budget` is the capacity: bands are filled from the top of the queue until the slots run out, so an alert tied on score with the last one admitted to a full band falls to the next one down. `score >= provenance.severity_thresholds[severity]` therefore always holds, and the reverse does not. |
 | `score` | Integer 0–100. |
 | `layer_scores` | Every layer present, `0` where the layer did not contribute. Never null. |
 | `reasons` | **At least one, always.** An alert with no reason is a bug — that is the whole product promise. `type` ∈ `rule`, `peer`, `ml`, `graph`, `temporal`. |
@@ -137,16 +148,26 @@ alongside the alert row, and returned verbatim by `GET /alerts/{id}`.
 | `recommended_actions` | 1–5 imperative sentences. Specific enough to act on without further analysis. |
 | `similar_cases` | Up to 5 `alert_id`s sharing the anomaly code and a comparable evidence shape. |
 | `provenance.policy_digest` | Hash of the policy pack the alert was scored under. An alert scored under a superseded policy must be visibly stale, not silently wrong. |
+| `provenance.severity_thresholds` | The score at each band boundary **this run actually produced**, because the budget moves them every run. A stored alert is checked against the bands it was banded under rather than against today's pack, which is the only comparison that means anything six months later. |
+| `provenance.evidence_fingerprint` | The hash suppression matches on: the window, the money and the evidence fields, never the score. A dismissed finding that comes back with a materially larger amount has a different fingerprint and is a new alert. |
+| `provenance.correlation_id` | Spans UI → API → detector. Derived from the run id and the policy digest, so a re-run of the same data quotes the same id rather than inventing one both sides then disagree about. |
 
 ## Validation
 
-`services/detector` validates every bundle against `services/detector/schemas/evidence_v1.json`
-before writing. The phase-6 gate fails if any bundle does not validate, and additionally asserts:
+`services/detector` validates every bundle against
+`services/detector/detector/evidence/schemas/evidence_v1.json` before writing. An invalid bundle
+fails the run: it would otherwise be discovered by the UI, in front of a reviewer, months later.
+The phase-6 gate fails if any bundle does not validate, and additionally asserts:
 
 - every alert has ≥ 1 reason with non-empty `text`;
 - every `CRITICAL`/`HIGH` alert has a non-null `financial_impact.monthly`;
 - `contributing_layers` is consistent with the non-zero entries in `layer_scores`;
-- `severity` agrees with `score` under the current `policy/fusion.yaml` bands.
+- `severity` agrees with `provenance.severity_thresholds` — every alert scores at or above the
+  boundary its band was cut at, and any alert the budget kept out of a full band is tied on score
+  with the last one admitted;
+- `timeline` covers exactly the run window, ascending, with no gaps;
+- the validator itself rejects a bundle with its `reasons` removed, because a schema nothing has
+  ever seen fail is documentation rather than a gate.
 
 ## 5. LLM grounding rule
 

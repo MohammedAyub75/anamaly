@@ -352,8 +352,77 @@ already built.
    `estimated`.
 7. Apply suppression: employee + code + evidence fingerprint matching a prior dismissal is
    suppressed and surfaced under a separate filter, not deleted.
-8. Write `data/runs/run_id=…/alerts.parquet` plus evidence JSON, then upsert into Postgres and
-   compute `agg_alerts_by_site_month` (phase 7).
+8. Write `data/runs/run_id=…/alerts.parquet`, the bundle travelling in the row's `evidence_json`
+   rather than as one JSON file per alert, then upsert into Postgres and compute
+   `agg_alerts_by_site_month` (phase 7).
+
+### What phase 6 actually wrote
+
+**An alert is one (employee, anomaly code)**, not one finding. The grain is fixed by
+`docs/EVIDENCE_CONTRACT.md` rather than chosen here: `alert_id` is defined as stable for that pair
+plus an evidence fingerprint, and `suppression.match_on` names the same three. It is also what
+collapses B06's two flagged bonus months into the one case a reviewer works — 353 findings become
+344 alerts at 10k. Findings are written to `alerts.parquet` with the bundle travelling in the row's
+`evidence_json`, so phase 8 upserts the queue and its evidence in one pass.
+
+**Each layer is ranked in its own population, because their outputs are not comparable.** Layer 1
+emits a fact, layer 2 a distance from a peer group, layer 3 a percentile. Step 1's "percentile rank
+within the scored population" is therefore applied per layer, over that layer's own findings, by
+cumulative exposure; `cume_dist` is used rather than `percent_rank` so the weakest finding a layer
+produced still scores above zero — a `layer_scores` entry of 0 means *this layer said nothing*, and
+the contract requires `contributing_layers` to agree with the non-zero entries. Layer 3's
+`ml_score` arrives already ranked over all 10,000 employees, and contributes only above
+`layer_contribution.ml_unsupervised_min_score`: the models score everybody, so without a floor they
+would corroborate every alert ever raised and the bonus would become a constant added to everything.
+
+**The weighted mean is taken over the contributing layers, not over all four.** Dividing by the
+full weight sum would put a graph finding on a shared bank account — SAR 1.3m of pay leaving to one
+account — at 25 out of 100 because three layers had nothing to say about it. The weights decide the
+blend when layers disagree; a lone layer's own rank stands, and `rule_hit_floor` then guarantees a
+broken clause lands at least in the HIGH band whatever the models think.
+
+**The corroboration bonus is spent on the distance still left to certainty**, `base + bonus ×
+(100 − base) / 100`, rather than added and clamped. At the bottom of the scale that is the addition
+`fusion.yaml` describes. At the top it is damped, because `min(100, base + bonus)` flattened every
+corroborated alert above 94 onto the same 100 and left a nine-way tie at the head of the queue —
+and a queue whose top is a tie cannot be banded to a budget at all.
+
+**The bands are capacity, bounded by the configured floors.** `severity_bands` gives each band a
+minimum score and `alert_budget` gives it a number of slots, scaled linearly from the 1m reference
+(5 CRITICAL and 50 HIGH at 10k). The queue is ordered worst-first and the bands are filled from the
+top until the slots run out. Threshold tuning alone cannot do this at 10k: the score is an integer
+0–100 over a few hundred alerts, so its top is a run of ties and moving a threshold by one point
+moves the CRITICAL count from three to eight. Capacity can only ever break such a tie — an alert it
+keeps out of a full band is tied on score with the last one admitted, which the gate asserts — and
+it can never promote: a band with only two records above its floor leaves three slots empty rather
+than reaching into WATCHLIST to fill them. The score at each boundary is written into every
+bundle's `provenance.severity_thresholds`, so a stored alert is checked against the bands it was
+banded under rather than against today's pack.
+
+**Every bundle is validated against `evidence_v1.json` before it is written**, and an invalid
+bundle fails the run. The gate also asserts that the validator rejects a bundle with its `reasons`
+removed: a schema nothing has ever seen fail is documentation rather than a gate.
+
+**Suppression hides, it never deletes.** A dismissed finding comes back in `alerts.parquet` with
+`suppressed = true` and a reason, so a "previously dismissed" filter is a query rather than a
+re-run. Three things must match — employee, code and the evidence fingerprint — the dismissal
+lapses after `expires_after_runs`, and a materially larger amount resurfaces it: the reviewer
+accepted the figure they were shown, not a figure 25% higher.
+
+Two divergences from `policy/fusion.yaml` as it was first written, both documented in the pack:
+
+- **`min_monthly_impact_to_alert` became `min_cumulative_impact_to_alert`.** A SAR 60 allowance paid
+  wrongly for 24 months is a SAR 1,440 recovery case; judging it on one month threw away five of
+  B07's six findings and three of D01's seven. Exposure over the window is what a reviewer recovers.
+  A finding with no financial dimension at all — a qualification gap, a grade outside its band — is
+  never filtered on money.
+- **`ranking.within_band_order` orders a band; it does not decide one.** Bands are handed out in
+  score order (money breaking a tie) and displayed within a band in the configured order, which is
+  impact first. Two different orders, and the pack's key says "within band".
+
+**Runtime at 10k**: fusion in ~1.2s for 344 alerts — the scoring is arithmetic over a few hundred
+rows, and the two DuckDB queries that denormalise employee display and the 24-month timeline are
+the only work that grows with the population.
 
 ## Evaluation harness (phase 3 onward)
 

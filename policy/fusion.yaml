@@ -30,6 +30,21 @@ corroboration_bonus:
   three_layers: 12
   four_layers: 18
 
+# When does a layer count as having contributed at all? A finding from a layer
+# always does. The two unsupervised models score *every* employee, so without a
+# floor they would corroborate every alert ever raised and the bonus above would
+# become a constant added to everything.
+layer_contribution:
+  ml_unsupervised_min_score: 90   # the top tenth of the population ranking
+
+# What a corroborating layer that produced no finding of its own says to the
+# reviewer. Business terms only: the models have no anomaly code to name, so the
+# sentence describes the record rather than the method (CLAUDE.md).
+corroboration_text:
+  ml_unsupervised: >
+    Taken as a whole -- pay, allowances, attendance and system activity together
+    -- this record is among the least like anyone else's in the workforce.
+
 severity_bands:
   CRITICAL:  {min_score: 88}
   HIGH:      {min_score: 72}
@@ -50,7 +65,11 @@ alert_budget:
 # expensive findings first.
 ranking:
   within_band_order: [financial_impact_cumulative, score, oldest_first]
-  min_monthly_impact_to_alert: 150   # SAR; below this it is noise, not a case
+  # SAR of exposure over the whole window, not per month: a small allowance paid
+  # wrongly for two years is a recovery case, not noise, and judging it on one
+  # month would throw it away. A finding with no financial dimension at all -- a
+  # qualification gap, a grade outside its band -- is never filtered on money.
+  min_cumulative_impact_to_alert: 150
 
 # Suppression of previously-dismissed findings (phase 13). An alert is
 # suppressed only when the employee, the code, AND the evidence fingerprint

@@ -25,20 +25,28 @@ from .lake import connect
 from .layers.l1_rules import L1Result, RuleSet, run_rules
 from .layers.l2_peer import L2Result, run_peer
 from .layers.l3_graph import L3Result, run_l3
+from .layers.l4_fusion import L4Result, ScoredAlert, run_fusion
 
 # In execution order. Later stages are declared here so `--stages` has a stable
 # surface and asking for one that is not built yet fails loudly.
 STAGES: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion")
 
-BUILT: tuple[str, ...] = ("features", "l1", "l2", "l3")
+BUILT: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion")
 
-STAGE_PHASE = {"fusion": 6}
+STAGE_PHASE: dict[str, int] = {}
 
 HITS_FILE = "l1_hits.parquet"
 L2_HITS_FILE = "l2_hits.parquet"
 L3_HITS_FILE = "l3_hits.parquet"
 L3_SCORES_FILE = "l3_scores.parquet"
+ALERTS_FILE = "alerts.parquet"
 STATE_FILE = "_stages.json"
+
+# Phase 13 writes this; phase 6 only has to read it, and to keep working when
+# nobody has dismissed anything yet. A suppression rule that only exists once
+# there is something to suppress is a rule that is first exercised in
+# production.
+DISMISSALS_FILE = "dismissals.parquet"
 
 
 class StageNotBuilt(RuntimeError):
@@ -58,10 +66,12 @@ class RunResult:
     l1: L1Result | None = None
     l2: L2Result | None = None
     l3: L3Result | None = None
+    l4: L4Result | None = None
     hits_path: Path | None = None
     l2_hits_path: Path | None = None
     l3_hits_path: Path | None = None
     l3_scores_path: Path | None = None
+    alerts_path: Path | None = None
 
     @property
     def findings(self) -> list[dict]:
@@ -111,6 +121,23 @@ def layer3_digest(policy) -> str:
     for name in ("l3_graph.py", "l3_ml.py"):
         digest.update((Path(__file__).parent / "layers" / name).read_bytes())
     digest.update(json.dumps(policy.graph_ml, sort_keys=True).encode("utf-8"))
+    return "sha256:" + digest.hexdigest()
+
+
+def layer4_digest(policy) -> str:
+    """A hash over the fusion engine, the bundle builder and the schema.
+
+    `fusion.yaml` is already in the policy digest, but a weight is not the only
+    thing that changes an alert: so does the shape of the object it is written
+    into. The schema is hashed with the code because a bundle that validated
+    yesterday and fails today is a different answer, not a stale one.
+    """
+    digest = hashlib.sha256()
+    digest.update((Path(__file__).parent / "layers" / "l4_fusion.py").read_bytes())
+    evidence = Path(__file__).parent / "evidence"
+    digest.update((evidence / "builder.py").read_bytes())
+    digest.update((evidence / "schemas" / "evidence_v1.json").read_bytes())
+    digest.update(json.dumps(policy.fusion, sort_keys=True).encode("utf-8"))
     return "sha256:" + digest.hexdigest()
 
 
@@ -238,6 +265,110 @@ def read_graph_hits(cfg: DetectorConfig) -> L3Result:
     return result
 
 
+ALERT_SCHEMA = {
+    "alert_id": pl.Utf8,
+    "employee_id": pl.Utf8,
+    "anomaly_code": pl.Utf8,
+    "family": pl.Utf8,
+    "layer": pl.Utf8,
+    "severity": pl.Utf8,
+    "score": pl.Int32,
+    "rank_in_band": pl.Int32,
+    "layer_score_rules": pl.Float64,
+    "layer_score_peer_stats": pl.Float64,
+    "layer_score_ml_unsupervised": pl.Float64,
+    "layer_score_graph": pl.Float64,
+    "contributing_layers": pl.List(pl.Utf8),
+    "period_from": pl.Int32,
+    "period_to": pl.Int32,
+    "months_flagged": pl.Int32,
+    "financial_impact_monthly": pl.Float64,
+    "financial_impact_cumulative": pl.Float64,
+    "financial_impact_confidence": pl.Utf8,
+    "evidence_fingerprint": pl.Utf8,
+    "suppressed": pl.Boolean,
+    "suppression_reason": pl.Utf8,
+    "findings": pl.Int32,
+    "evidence_json": pl.Utf8,
+}
+
+
+def alert_rows(result: L4Result) -> list[dict]:
+    """The fused alerts as flat rows. `layer_scores` is flattened rather than
+    nested because a queue is filtered and sorted on those four numbers, and a
+    struct column is not what a SQL filter or a Postgres upsert wants."""
+    rows = []
+    for alert in result.alerts:
+        row = {
+            k: getattr(alert, k)
+            for k in ALERT_SCHEMA
+            if not k.startswith("layer_score_")
+        }
+        for name, value in alert.layer_scores.items():
+            row[f"layer_score_{name}"] = float(value)
+        rows.append(row)
+    return rows
+
+
+def write_alerts(cfg: DetectorConfig, result: L4Result) -> Path:
+    """`alerts.parquet`: the ranked queue plus the bundle that explains each row.
+
+    The bundle travels in the row rather than as one JSON file per alert. Phase
+    8 upserts it into Postgres as JSONB in one pass, and 35,000 small files at
+    1m scale would be a directory nobody can copy.
+    """
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg.run_dir / ALERTS_FILE
+    pl.DataFrame(alert_rows(result), schema=ALERT_SCHEMA).write_parquet(path)
+    return path
+
+
+def read_alerts(cfg: DetectorConfig) -> L4Result:
+    """Load a cached fusion pass back. The band tuning is not cached: it
+    describes the decision the pass made rather than feeding it, and the
+    thresholds it chose are already in every bundle's provenance."""
+    frame = pl.read_parquet(cfg.run_dir / ALERTS_FILE)
+    result = L4Result()
+    for row in frame.to_dicts():
+        scores = {
+            name: float(row.pop(f"layer_score_{name}"))
+            for name in ("rules", "peer_stats", "ml_unsupervised", "graph")
+        }
+        result.alerts.append(ScoredAlert(layer_scores=scores, **row))
+    for alert in result.alerts:
+        result.by_severity[alert.severity] = (
+            result.by_severity.get(alert.severity, 0) + 1
+        )
+        result.by_code[alert.anomaly_code] = (
+            result.by_code.get(alert.anomaly_code, 0) + 1
+        )
+        result.by_layer[alert.layer] = result.by_layer.get(alert.layer, 0) + 1
+    result.suppressed = sum(1 for a in result.alerts if a.suppressed)
+    result.validated = len(result.alerts)
+    return result
+
+
+def read_ml_scores(path: Path | None) -> dict[str, float]:
+    """Layer 3's per-employee score, which fusion weights as `ml_unsupervised`."""
+    if path is None or not Path(path).exists():
+        return {}
+    frame = pl.read_parquet(path)
+    if "ml_score" not in frame.columns:
+        return {}
+    return {
+        str(e): float(s)
+        for e, s in zip(frame["employee_id"], frame["ml_score"])
+    }
+
+
+def read_dismissals(cfg: DetectorConfig) -> list[dict]:
+    """Prior dismissals, if phase 13 has written any. Empty is the normal case."""
+    path = cfg.runs_root / DISMISSALS_FILE
+    if not path.exists():
+        return []
+    return pl.read_parquet(path).to_dicts()
+
+
 def run(
     cfg: DetectorConfig,
     policy,
@@ -362,6 +493,63 @@ def run(
             _save_state(cfg, state)
             if log:
                 log(f"l3        {l3.total:,} findings  {l3.seconds:.2f}s")
+
+    if "fusion" in wanted:
+        # Fusion depends on what every layer found, so its key carries theirs.
+        # A re-run that only changed a weight re-runs this stage and nothing
+        # else, which is the whole point of the stage cache.
+        key = "|".join(
+            [
+                features_cache_key(cfg, policy),
+                str(state.get("l1")), str(state.get("l2")), str(state.get("l3")),
+                layer4_digest(policy), cfg.run_id,
+            ]
+        )
+        cached = cfg.run_dir / ALERTS_FILE
+        if not force and state.get("fusion") == key and cached.exists():
+            result.l4 = read_alerts(cfg)
+            result.alerts_path = cached
+            result.stage_seconds["fusion (cached)"] = float(
+                state.get("fusion_seconds", 0.0)
+            )
+            result.stage_cached["fusion"] = True
+            if log:
+                log(f"fusion    {len(result.l4.alerts):,} alerts  (cached)")
+        else:
+            if result.l1 is None and (cfg.run_dir / HITS_FILE).exists():
+                result.l1 = read_hits(cfg)
+            if result.l2 is None and (cfg.run_dir / L2_HITS_FILE).exists():
+                result.l2 = read_peer_hits(cfg)
+            if result.l3 is None and (cfg.run_dir / L3_HITS_FILE).exists():
+                result.l3 = read_graph_hits(cfg)
+            if result.l1 is None:
+                raise StageNotBuilt(
+                    "fusion has nothing to fuse: run the l1, l2 and l3 stages "
+                    "first, or drop --stages to run the whole batch"
+                )
+            scores_path = result.l3_scores_path or (cfg.run_dir / L3_SCORES_FILE)
+            con = connect(cfg, features=True, threads=threads)
+            try:
+                l4 = run_fusion(
+                    con, cfg, policy,
+                    l1_hits=result.l1.hits if result.l1 else [],
+                    l2_hits=result.l2.hits if result.l2 else [],
+                    l3_hits=result.l3.hits if result.l3 else [],
+                    ml_scores=read_ml_scores(scores_path),
+                    dismissals=read_dismissals(cfg),
+                    log=log,
+                )
+            finally:
+                con.close()
+            result.l4 = l4
+            result.alerts_path = write_alerts(cfg, l4)
+            result.stage_seconds["fusion"] = l4.seconds
+            result.stage_cached["fusion"] = False
+            state["fusion"] = key
+            state["fusion_seconds"] = l4.seconds
+            _save_state(cfg, state)
+            if log:
+                log(f"fusion    {l4.total:,} alerts  {l4.seconds:.2f}s")
 
     result.seconds = round(time.perf_counter() - started, 3)
     return result

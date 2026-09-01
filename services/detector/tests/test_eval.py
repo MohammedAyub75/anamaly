@@ -106,7 +106,7 @@ def test_report_renders_the_reading_order(evaluation) -> None:
         "## 1. Per-anomaly-code recall",
         "## 2. Confounder false positives",
         "## 3. Precision at depth",
-        "## 4. Alert budget",
+        "## 4. Alerts after fusion",
         "## 5. Runtime profile",
     ):
         assert heading in text
@@ -114,6 +114,20 @@ def test_report_renders_the_reading_order(evaluation) -> None:
     assert text.index("## 1.") < text.index("## 2.") < text.index("## 3.")
     for code in [f"A{n:02d}" for n in range(1, 13)]:
         assert re.search(rf"\| {code} \|", text), code
+
+
+def test_report_reports_the_queue(evaluation) -> None:
+    """Section 4 is about alerts, not findings: precision per band is the number
+    a reviewer feels, and one overall figure hides which band is wrong."""
+    queue = evaluation.alerts
+    assert queue is not None
+    assert queue.alerts <= queue.findings
+    assert queue.validated == queue.alerts
+    assert queue.budget_ok, queue.by_severity
+    assert not queue.critical_confounders
+    text = report.render(evaluation)
+    assert "Lowest score" in text
+    assert f"{queue.alerts:,} alerts" in text
 
 
 def test_report_writes_where_the_skill_says(evaluation, tmp_path: Path) -> None:

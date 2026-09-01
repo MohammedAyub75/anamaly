@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anomaly.local/schemas/evidence_v1.json",
+  "title": "Evidence bundle, version 1",
+  "description": "The one object the detector, the API, the UI and the LLM narrator share. The authoritative prose lives in docs/EVIDENCE_CONTRACT.md; this file is that document made machine-checkable, and layer 4 refuses to write a bundle that fails it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "alert_id", "run_id", "employee_id", "employee_display",
+    "anomaly_codes", "families", "severity", "score", "layer_scores",
+    "contributing_layers", "reasons", "timeline", "financial_impact",
+    "recommended_actions", "suppression", "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "alert_id": {"type": "string", "pattern": "^ALT-[0-9]{6,}$"},
+    "run_id": {"type": "string", "minLength": 1},
+    "employee_id": {"type": "string", "minLength": 1},
+
+    "employee_display": {
+      "type": "object",
+      "required": ["name_en", "badge_no", "grade", "job_title_en",
+                   "org_unit_name_en", "site_name_en", "site_id",
+                   "region_code", "employment_type", "status"],
+      "properties": {
+        "name_en": {"type": "string", "minLength": 1},
+        "name_ar": {"type": ["string", "null"]},
+        "badge_no": {"type": "string"},
+        "grade": {"type": "integer"},
+        "job_title_en": {"type": "string"},
+        "org_unit_name_en": {"type": ["string", "null"]},
+        "site_name_en": {"type": ["string", "null"]},
+        "site_id": {"type": ["string", "null"]},
+        "region_code": {"type": ["string", "null"]},
+        "employment_type": {"type": ["string", "null"]},
+        "status": {"type": ["string", "null"]}
+      }
+    },
+
+    "anomaly_codes": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-D][0-9]{2}$"}
+    },
+    "families": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "enum": ["A", "B", "C", "D"]}
+    },
+    "severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "WATCHLIST"]},
+    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+
+    "layer_scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rules", "peer_stats", "ml_unsupervised", "graph"],
+      "properties": {
+        "rules": {"type": "number", "minimum": 0, "maximum": 100},
+        "peer_stats": {"type": "number", "minimum": 0, "maximum": 100},
+        "ml_unsupervised": {"type": "number", "minimum": 0, "maximum": 100},
+        "graph": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "contributing_layers": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"enum": ["rules", "peer_stats", "ml_unsupervised", "graph"]}
+    },
+
+    "reasons": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["type", "text"],
+        "properties": {
+          "type": {"enum": ["rule", "peer", "ml", "graph", "temporal"]},
+          "rule_id": {"type": ["string", "null"]},
+          "text": {"type": "string", "minLength": 1},
+          "regulatory_reference": {"type": ["string", "null"]},
+          "since": {"type": ["string", "null"]},
+          "evidence_fields": {"type": ["object", "null"]}
+        }
+      }
+    },
+
+    "peer_context": {
+      "type": ["object", "null"],
+      "required": ["cohort_key", "cohort_n"],
+      "properties": {
+        "cohort_key": {"type": "string", "minLength": 1},
+        "cohort_key_level": {"type": ["integer", "null"]},
+        "cohort_key_fallback_reason": {"type": ["string", "null"]},
+        "cohort_n": {"type": "integer", "minimum": 1},
+        "metric": {"type": ["string", "null"]},
+        "employee_value": {"type": ["number", "null"]},
+        "cohort_median": {"type": ["number", "null"]},
+        "cohort_mad": {"type": ["number", "null"]},
+        "percentile": {"type": ["number", "null"]},
+        "robust_z": {"type": ["number", "null"]}
+      }
+    },
+
+    "graph_context": {
+      "type": ["object", "null"],
+      "required": ["link_type", "link_value_masked", "component_size",
+                   "related_employees"],
+      "properties": {
+        "link_type": {"type": "string", "minLength": 1},
+        "link_value_masked": {"type": "string", "maxLength": 6},
+        "component_size": {"type": "integer", "minimum": 1},
+        "component_class": {"enum": ["unrelated", "spousal", "near_duplicate", null]},
+        "total_monthly_disbursement": {"type": ["number", "null"]},
+        "related_employees": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["employee_id"],
+            "properties": {
+              "employee_id": {"type": "string"},
+              "name_en": {"type": ["string", "null"]},
+              "org_unit_name_en": {"type": ["string", "null"]},
+              "site_name_en": {"type": ["string", "null"]},
+              "monthly_net": {"type": ["number", "null"]}
+            }
+          }
+        }
+      }
+    },
+
+    "feature_attributions": {
+      "type": ["array", "null"], "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["feature", "label_en", "contribution", "direction"],
+        "properties": {
+          "feature": {"type": "string"},
+          "label_en": {"type": "string", "minLength": 1},
+          "contribution": {"type": "number"},
+          "direction": {"enum": ["increases", "reduces", "unexpected"]},
+          "value": {},
+          "value_sar": {"type": ["number", "null"]}
+        }
+      }
+    },
+
+    "timeline": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["period", "base_pay", "allowance_total", "net", "flagged"],
+        "properties": {
+          "period": {"type": "integer", "minimum": 190001, "maximum": 999912},
+          "base_pay": {"type": ["number", "null"]},
+          "allowance_total": {"type": ["number", "null"]},
+          "net": {"type": ["number", "null"]},
+          "flagged": {"type": "boolean"},
+          "event": {"type": ["string", "null"]}
+        }
+      }
+    },
+
+    "financial_impact": {
+      "type": "object",
+      "required": ["monthly", "cumulative", "currency", "confidence"],
+      "properties": {
+        "monthly": {"type": "number"},
+        "cumulative": {"type": "number"},
+        "currency": {"const": "SAR"},
+        "basis": {"type": ["string", "null"]},
+        "confidence": {"enum": ["exact", "estimated", "unknown"]},
+        "periods_affected": {
+          "type": ["object", "null"],
+          "required": ["from", "to"],
+          "properties": {
+            "from": {"type": "integer"},
+            "to": {"type": "integer"}
+          }
+        }
+      }
+    },
+
+    "recommended_actions": {
+      "type": "array", "minItems": 1, "maxItems": 5,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "similar_cases": {
+      "type": "array", "maxItems": 5,
+      "items": {"type": "string", "pattern": "^ALT-[0-9]{6,}$"}
+    },
+
+    "suppression": {
+      "type": "object",
+      "required": ["suppressed", "reason", "prior_disposition_id"],
+      "properties": {
+        "suppressed": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]},
+        "prior_disposition_id": {"type": ["string", "null"]}
+      }
+    },
+
+    "provenance": {
+      "type": "object",
+      "required": ["detector_version", "policy_digest", "scored_at",
+                   "data_scale", "correlation_id", "evidence_fingerprint",
+                   "severity_thresholds"],
+      "properties": {
+        "detector_version": {"type": "string"},
+        "policy_digest": {"type": "string"},
+        "scored_at": {"type": "string"},
+        "data_scale": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "evidence_fingerprint": {"type": "string"},
+        "severity_thresholds": {
+          "type": "object",
+          "required": ["CRITICAL", "HIGH", "MEDIUM"],
+          "properties": {
+            "CRITICAL": {"type": "number"},
+            "HIGH": {"type": "number"},
+            "MEDIUM": {"type": "number"}
+          }
+        }
+      }
+    }
+  }
+}

@@ -28,6 +28,7 @@ from ..layers.l2_peer import CohortAssignment, L2Result
 from ..layers.l2_salary import SalaryExpectation
 from ..layers.l3_graph import GraphSummary, L3Result
 from ..layers.l3_ml import MLScores
+from ..layers.l4_fusion import BAND_ORDER, L4Result
 
 # Precision is reported at the depths a reviewer actually works to. @100 matters
 # most: those are the alerts somebody opens on Monday morning.
@@ -139,6 +140,49 @@ class MLSeparation:
 
 
 @dataclass
+class AlertSummary:
+    """The queue layer 4 produced, measured the way a reviewer would meet it.
+
+    The recall table above is about findings; this is about *alerts*, and the
+    two differ on purpose. Findings are what the detectors said; alerts are what
+    somebody is asked to work, banded to a weekly budget. A detector can have
+    perfect recall and still fail here -- by burying the five things that matter
+    under three hundred that do not.
+    """
+
+    alerts: int
+    findings: int
+    employees: int
+    dropped_low_impact: int
+    suppressed: int
+    corroborated: int
+    validated: int
+    by_severity: dict[str, int]
+    budget: dict[str, float]
+    thresholds: dict[str, float]
+    within_budget: dict[str, bool]
+    precision_by_band: dict[str, float | None]
+    impact_by_band: dict[str, float]
+    confounders_by_band: dict[str, int]
+    critical_confounders: list[str]
+    codes_covered: int
+
+    @property
+    def per_1000(self) -> float:
+        """Alerts per 1,000 employees -- the only comparable rate across tiers."""
+        return self.alerts / self.employees * 1000 if self.employees else 0.0
+
+    @property
+    def collapse(self) -> float:
+        """Findings per alert. B06 raises two flagged bonus months for one case."""
+        return self.findings / self.alerts if self.alerts else 0.0
+
+    @property
+    def budget_ok(self) -> bool:
+        return all(self.within_budget.values())
+
+
+@dataclass
 class EvalReport:
     """Everything `docs/EVAL_REPORT.md` renders, computed once."""
 
@@ -168,6 +212,10 @@ class EvalReport:
     # the injected set above the rest of the workforce.
     graph: GraphSummary | None = None
     ml: MLSeparation | None = None
+    # Layer 4's description of itself: the queue, its bands, and whether the
+    # bands still separate a true finding from a planted look-alike once the
+    # budget has decided how many of each there may be.
+    alerts: AlertSummary | None = None
 
     # ------------------------------------------------------------ summaries
 
@@ -404,12 +452,95 @@ def _ml_separation(
     )
 
 
+def _alert_summary(
+    con: duckdb.DuckDBPyConnection, cfg: DetectorConfig, result: L4Result
+) -> AlertSummary:
+    """Score the fused queue: precision per band, and who reached CRITICAL.
+
+    Precision is measured per band because that is the number a reviewer feels.
+    A CRITICAL band that is 60% right is a worse product than a MEDIUM band that
+    is 60% right, and one overall figure hides which of the two you have.
+    """
+    con.execute(
+        """
+        CREATE OR REPLACE TEMP TABLE alerts (
+            alert_id VARCHAR, employee_id VARCHAR, anomaly_code VARCHAR,
+            severity VARCHAR, score INTEGER, impact DOUBLE, suppressed BOOLEAN
+        )
+        """
+    )
+    con.executemany(
+        "INSERT INTO alerts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (a.alert_id, a.employee_id, a.anomaly_code, a.severity, a.score,
+             a.financial_impact_cumulative, a.suppressed)
+            for a in result.alerts
+        ],
+    )
+    rows = con.execute(
+        """
+        SELECT a.severity,
+               count(*),
+               count(*) FILTER (WHERE l.employee_id IS NOT NULL),
+               coalesce(sum(a.impact), 0)
+        FROM alerts a
+        LEFT JOIN (SELECT DISTINCT anomaly_code, employee_id FROM labels_anomaly) l
+          ON l.anomaly_code = a.anomaly_code AND l.employee_id = a.employee_id
+        GROUP BY 1
+        """
+    ).fetchall()
+    precision = {r[0]: (int(r[2]) / int(r[1]) if r[1] else None) for r in rows}
+    impact = {r[0]: float(r[3]) for r in rows}
+
+    confounders = con.execute(
+        """
+        SELECT a.severity, count(DISTINCT c.employee_id),
+               list(DISTINCT c.confounder_type)
+        FROM labels_confounder c
+        JOIN alerts a USING (employee_id)
+        GROUP BY 1
+        """
+    ).fetchall()
+    by_band = {r[0]: int(r[1]) for r in confounders}
+    critical = sorted(
+        {name for r in confounders if r[0] == "CRITICAL" for name in (r[2] or [])}
+    )
+
+    tuning = result.tuning
+    budget = dict(tuning.budget) if tuning else {}
+    within = (
+        {band: tuning.within_tolerance(band) for band in ("CRITICAL", "HIGH")}
+        if tuning else {}
+    )
+    return AlertSummary(
+        alerts=result.total,
+        findings=result.findings_in,
+        employees=cfg.employees,
+        dropped_low_impact=result.dropped_low_impact,
+        suppressed=result.suppressed,
+        corroborated=result.corroborated,
+        validated=result.validated,
+        by_severity={
+            band: result.by_severity.get(band, 0) for band in BAND_ORDER
+        },
+        budget=budget,
+        thresholds=dict(result.thresholds),
+        within_budget=within,
+        precision_by_band={band: precision.get(band) for band in BAND_ORDER},
+        impact_by_band={band: impact.get(band, 0.0) for band in BAND_ORDER},
+        confounders_by_band={band: by_band.get(band, 0) for band in BAND_ORDER},
+        critical_confounders=critical,
+        codes_covered=len(result.by_code),
+    )
+
+
 def evaluate(
     cfg: DetectorConfig,
     ruleset: RuleSet,
     l1: L1Result,
     l2: L2Result | None = None,
     l3: L3Result | None = None,
+    l4: L4Result | None = None,
     *,
     planned: dict[str, str] | None = None,  # defaults to PLANNED
     runtime: dict[str, float] | None = None,
@@ -439,6 +570,7 @@ def evaluate(
         confounders = _confounder_scores(con)
         precision = _precision_at(con)
         separation = _ml_separation(con, l3.ml) if l3 and l3.ml else None
+        queue = _alert_summary(con, cfg, l4) if l4 else None
         severity = dict(
             con.execute(
                 "SELECT severity, count(*) FROM hits GROUP BY 1 ORDER BY 1"
@@ -483,6 +615,7 @@ def evaluate(
         salary=l2.salary if l2 else None,
         graph=l3.graph if l3 else None,
         ml=separation,
+        alerts=queue,
     )
     if not budget.get("by_code"):
         report.warnings.append("lake manifest carries no injection counts")
