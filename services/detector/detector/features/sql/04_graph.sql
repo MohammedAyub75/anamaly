@@ -34,11 +34,23 @@ identity_size AS (
     UNION ALL
     SELECT iqama_no, count(*) FROM employee_master WHERE iqama_no IS NOT NULL GROUP BY 1
 ),
-identity_per_employee AS (
-    SELECT e.employee_id, max(d.n) AS identity_cluster_size
+-- Two equality joins rather than one join on `national_id OR iqama_no`. The
+-- OR form is the same answer and DuckDB cannot hash it: it degrades to a
+-- nested loop, which is a second at 10k, a minute and a half at 100k and hours
+-- at 1m. Every join in the feature build has to be an equality (phase 7).
+identity_matches AS (
+    SELECT e.employee_id, d.n
     FROM employee_master e
-    JOIN identity_size d ON d.identifier = e.national_id OR d.identifier = e.iqama_no
-    GROUP BY e.employee_id
+    JOIN identity_size d ON d.identifier = e.national_id
+    UNION ALL
+    SELECT e.employee_id, d.n
+    FROM employee_master e
+    JOIN identity_size d ON d.identifier = e.iqama_no
+),
+identity_per_employee AS (
+    SELECT employee_id, max(n) AS identity_cluster_size
+    FROM identity_matches
+    GROUP BY employee_id
 ),
 -- Walk up the manager chain. The depth cap is what makes a cycle terminate:
 -- a chain that revisits its own root is a cycle, and stopping there is how the

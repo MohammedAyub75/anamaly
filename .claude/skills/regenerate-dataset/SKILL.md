@@ -22,7 +22,7 @@ reflexively.
 ```bash
 python tasks.py datagen --scale 10k  --seed 42     # development — seconds
 python tasks.py datagen --scale 100k --seed 42     # integration
-python tasks.py datagen --scale 1m   --seed 42     # full — target < 10 min, < 12 GB RAM
+python tasks.py datagen --scale 1m   --seed 42     # full — ~2 hours, peak ~9 GB, ~13 GB of disk
 ```
 
 **Always the same seed** unless you are deliberately testing seed independence. `42` is the project
@@ -69,7 +69,7 @@ meaningless and quietly corrupts the "what changed since last run" view.
 |---|---|---|---|
 | `10k` | 10,000 | 240,000 | Development and every phase gate |
 | `100k` | 100,000 | 2,400,000 | Integration, performance smoke |
-| `1m` | 1,000,000 | 24,000,000 | Full run, phase-7 target |
+| `1m` | 1,000,000 | 23,400,000 | Full run. ~2 hours to generate; do it once and score it many times |
 
 Develop at 10k. Every gate except phase 7 runs at 10k on purpose — a cheap gate gets run, and an
 expensive gate gets skipped.

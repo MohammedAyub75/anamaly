@@ -11,12 +11,17 @@ check that refuses to score a run against stale ground truth.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from functools import cached_property
 from pathlib import Path
 
+from policycore import runtime as runtime_pack
 from policycore.packs import EDUCATION_ORDER, PolicyPack
 
 POLICY_ROOT = "policy"
+
+
 
 ROTATION_PATTERNS = ("rotation_28_28", "rotation_14_14")
 
@@ -384,6 +389,78 @@ class DetectorPolicy:
                 raise KeyError(f"graph_ml.yaml: codes.{code}.layer is missing")
             mapping[code] = str(layer)
         return mapping
+
+    # ------------------------------------------------------ runtime (phase 7)
+
+    @cached_property
+    def runtime(self) -> dict:
+        """`policy/runtime.yaml`: what the batch may spend, not what it decides.
+
+        Missing is not fatal -- a checkout without the file still runs, at the
+        defaults below -- because this pack cannot change a figure, only the
+        cost of producing one.
+        """
+        return runtime_pack.load(self.pack.root)
+
+    @property
+    def runtime_digest(self) -> str:
+        """A hash over the runtime dials, for the stage caches that spend them."""
+        return "sha256:" + hashlib.sha256(
+            json.dumps(self.runtime, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    @property
+    def duckdb_memory_limit(self) -> str | None:
+        """DuckDB's own budget, as the `SET memory_limit` string it expects."""
+        limit = (self.runtime.get("duckdb") or {}).get("memory_limit_gb")
+        return None if limit in (None, "") else f"{float(limit):.1f}GB"
+
+    @property
+    def duckdb_threads(self) -> int | None:
+        threads = (self.runtime.get("duckdb") or {}).get("threads")
+        return None if threads in (None, "") else int(threads)
+
+    @property
+    def duckdb_temp_directory(self) -> str | None:
+        """Where DuckDB spills. Spilling slowly beats being killed by the OS."""
+        temp = (self.runtime.get("duckdb") or {}).get("temp_directory")
+        return None if temp in (None, "") else str(temp)
+
+    @property
+    def peak_rss_budget_gb(self) -> float:
+        return float((self.runtime.get("batch") or {}).get("peak_rss_gb", 12.0))
+
+    @property
+    def target_minutes(self) -> float:
+        return float((self.runtime.get("batch") or {}).get("target_minutes", 15.0))
+
+    @property
+    def sample_interval_seconds(self) -> float:
+        return float(
+            (self.runtime.get("batch") or {}).get("sample_interval_seconds", 0.25)
+        )
+
+    @property
+    def rows_per_write(self) -> int:
+        """How many rows of a period-grained feature table one write may hold."""
+        return int(
+            (self.runtime.get("features") or {}).get("rows_per_write", 2_000_000)
+        )
+
+    @property
+    def bundle_chunk_alerts(self) -> int:
+        """How many alerts' bundles are assembled from one pass over the lake."""
+        return int(
+            (self.runtime.get("fusion") or {}).get("bundle_chunk_alerts", 4000)
+        )
+
+    @property
+    def aggregate(self) -> dict:
+        return dict(self.runtime.get("aggregate") or {})
+
+    @property
+    def aggregate_top_codes(self) -> int:
+        return int(self.aggregate.get("top_codes", 3))
 
     def allowance_label_case(self, column: str = "allowance_code") -> str:
         """Allowance code -> display name, as SQL. No raw code reaches a reviewer."""

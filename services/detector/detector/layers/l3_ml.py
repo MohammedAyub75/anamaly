@@ -183,6 +183,9 @@ class MLScores:
     forest_seconds: float
     autoencoder_seconds: float
     seconds: float
+    # How many records carry a per-feature explanation. Below the population
+    # at 1m, where only the strangest records are explained.
+    attributed: int = 0
     table: Any = field(repr=False, default=None)  # pyarrow.Table
 
     @property
@@ -199,17 +202,56 @@ class MLScores:
 # --------------------------------------------------------------------------
 
 
-def _encode(values: np.ndarray) -> tuple[np.ndarray, int]:
+class LevelColumn:
+    """A categorical column as codes plus levels, never one string per row.
+
+    The attribution needs the *value* behind a code for the handful of records
+    it explains, so the levels have to survive the encoding.  Materialising
+    them back into a per-row array of strings costs a hundred megabytes a
+    column at 1m and is read for perhaps twenty thousand rows, so the column
+    stays as it was encoded and is indexed on demand.
+    """
+
+    __slots__ = ("codes", "levels")
+
+    def __init__(self, levels: np.ndarray, codes: np.ndarray) -> None:
+        self.levels = levels
+        self.codes = codes
+
+    def __len__(self) -> int:
+        return len(self.codes)
+
+    def __getitem__(self, item):
+        if isinstance(item, slice):
+            return LevelColumn(self.levels, self.codes[item])
+        return self.levels[int(self.codes[item])]
+
+
+def _encode(values) -> tuple[np.ndarray, int, np.ndarray]:
     """Categoricals to a stable ordinal code, sorted by value not by row order.
 
     Two runs over one lake must fit the same model and quote the same figures,
     and an encoding that depended on which row DuckDB returned first would
-    quietly break that.
+    quietly break that -- hence the sort, which Arrow's dictionary encoding
+    does not give (it numbers levels in the order they first appear).
+
+    Vectorised through Arrow rather than a Python dict lookup per row: the
+    dictionary form is one pass in C over the column, where the dict was one
+    hash per employee per categorical -- fifteen million of them at 1m.
     """
-    text = np.array(["" if v is None else str(v) for v in values])
-    levels = np.unique(text)
-    lookup = {level: i for i, level in enumerate(levels)}
-    return np.array([lookup[v] for v in text], dtype=np.int64), len(levels)
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    array = values if isinstance(values, pa.Array | pa.ChunkedArray) else pa.array(values)
+    encoded = pc.dictionary_encode(pc.cast(array, pa.string()).fill_null(""))
+    if isinstance(encoded, pa.ChunkedArray):
+        encoded = encoded.combine_chunks()
+    levels = encoded.dictionary.to_numpy(zero_copy_only=False)
+    indices = encoded.indices.to_numpy(zero_copy_only=False).astype(np.int64)
+    order = np.argsort(levels, kind="stable")
+    rank = np.empty(len(levels), dtype=np.int64)
+    rank[order] = np.arange(len(levels), dtype=np.int64)
+    return rank[indices], len(levels), levels[order]
 
 
 def build_matrix(
@@ -249,38 +291,50 @@ def build_matrix(
     if not numeric:
         raise MLError(f"{table} yielded no numeric columns for the layer-3 matrix")
 
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
     columns = ", ".join(["employee_id", *numeric, *categorical])
     frame = con.execute(
         f"SELECT {columns} FROM {table} ORDER BY employee_id"
     ).to_arrow_table()
-    raw = {
-        name: frame.column(name).to_numpy(zero_copy_only=False)
-        for name in frame.column_names
-    }
 
-    employees = raw["employee_id"].astype(str)
-    stacked = []
-    for name in numeric:
-        column = np.asarray(raw[name], dtype=object)
-        as_float = np.array(
-            [np.nan if v is None else float(v) for v in column], dtype=np.float64
-        )
+    employees = frame.column("employee_id").to_numpy(zero_copy_only=False).astype(str)
+    rows = len(employees)
+
+    # One column at a time, cast in Arrow rather than converted per value in
+    # Python: at 1m the old form was sixty-six million float() calls through an
+    # object array, which cost more than fitting either model.
+    values = np.empty((rows, len(numeric)), dtype=np.float64)
+    for position, name in enumerate(numeric):
+        column = pc.cast(frame.column(name), pa.float64())
+        as_float = column.to_numpy(zero_copy_only=False).astype(np.float64, copy=False)
+        finite = np.isfinite(as_float)
         # A missing value is imputed to the population median rather than to
         # zero: zero is a real salary and a real allowance count, and imputing
         # to it would invent an outlier where the record is merely incomplete.
-        finite = as_float[np.isfinite(as_float)]
-        fill = float(np.median(finite)) if finite.size else 0.0
-        stacked.append(np.where(np.isfinite(as_float), as_float, fill))
-    values = np.column_stack(stacked) if stacked else np.zeros((len(employees), 0))
+        fill = float(np.median(as_float[finite])) if finite.any() else 0.0
+        values[:, position] = np.where(finite, as_float, fill)
 
-    codes, cardinalities = [], []
+    codes, cardinalities, level_columns = [], [], {}
     for name in categorical:
-        encoded, levels = _encode(raw[name])
+        encoded, levels, names_of_levels = _encode(frame.column(name))
         codes.append(encoded)
         cardinalities.append(levels)
+        level_columns[name] = names_of_levels
     category_matrix = (
-        np.column_stack(codes) if codes else np.zeros((len(employees), 0), dtype=np.int64)
+        np.column_stack(codes) if codes else np.zeros((rows, 0), dtype=np.int64)
     )
+    del frame
+
+    # The per-column view an attribution reads its value from. Numeric columns
+    # are views into the matrix itself and cost nothing; categoricals stay in
+    # their encoded form (`LevelColumn`) rather than becoming a string a row.
+    displayed: dict[str, Any] = {
+        name: values[:, position] for position, name in enumerate(numeric)
+    }
+    for position, name in enumerate(categorical):
+        displayed[name] = LevelColumn(level_columns[name], category_matrix[:, position])
 
     matrix = FeatureMatrix(
         employees=employees,
@@ -289,7 +343,7 @@ def build_matrix(
         categorical=category_matrix,
         categorical_names=tuple(categorical),
         cardinalities=tuple(cardinalities),
-        values={name: raw[name] for name in [*numeric, *categorical]},
+        values=displayed,
     )
     if log:
         log(
@@ -336,16 +390,25 @@ def _percentile(score: np.ndarray) -> np.ndarray:
 
 
 def fit_forest(matrix: FeatureMatrix, config: dict) -> tuple[np.ndarray, float]:
-    """Isolation Forest over the standardised matrix. Higher score = stranger."""
+    """Isolation Forest over the standardised matrix. Higher score = stranger.
+
+    Fitting is cheap whatever the population -- `max_samples` bounds it by
+    definition -- and scoring is what grows: every employee walks 300 trees.
+    It is therefore done a block of rows at a time (`score_batch_rows`), so
+    the peak is one block's worth of tree traversal rather than a million
+    rows' worth, and the float32 matrix sklearn wants is built once per block
+    instead of doubling the whole matrix.
+    """
     from sklearn.ensemble import IsolationForest
 
     started = time.perf_counter()
     numeric, _, _ = _standardise(matrix.numeric)
-    features = np.column_stack(
-        [numeric, matrix.categorical.astype(np.float64)]
+    features = (
+        np.column_stack([numeric, matrix.categorical]).astype(np.float32, copy=False)
         if matrix.categorical.shape[1]
-        else [numeric]
+        else numeric.astype(np.float32, copy=False)
     )
+    del numeric
     forest = IsolationForest(
         n_estimators=int(config["n_estimators"]),
         max_samples=int(config["max_samples"]),
@@ -357,7 +420,13 @@ def fit_forest(matrix: FeatureMatrix, config: dict) -> tuple[np.ndarray, float]:
     forest.fit(features)
     # `score_samples` is higher for normal points; negate so that in this
     # module "bigger" always means "stranger", whichever model produced it.
-    raw = -np.asarray(forest.score_samples(features), dtype=np.float64)
+    block = int(config.get("score_batch_rows") or len(features) or 1)
+    raw = np.empty(len(features), dtype=np.float64)
+    for start in range(0, len(features), block):
+        stop = min(start + block, len(features))
+        raw[start:stop] = -np.asarray(
+            forest.score_samples(features[start:stop]), dtype=np.float64
+        )
     return raw, round(time.perf_counter() - started, 3)
 
 
@@ -413,10 +482,13 @@ def train_autoencoder(
         torch.use_deterministic_algorithms(True, warn_only=True)
 
     numeric, _, _ = _standardise(matrix.numeric)
-    numeric_tensor = torch.tensor(numeric, dtype=torch.float32, device=resolved)
-    category_tensor = torch.tensor(
-        matrix.categorical, dtype=torch.long, device=resolved
-    )
+    # The whole population stays on the host and is scored a batch at a time;
+    # only what the model trains on is moved to the device. At 1m the matrix
+    # is a few hundred megabytes of VRAM that buys nothing -- every row is
+    # visited exactly once at scoring time either way.
+    numeric_tensor = torch.tensor(numeric, dtype=torch.float32)
+    category_tensor = torch.tensor(matrix.categorical, dtype=torch.long)
+    del numeric
     n_numeric = numeric_tensor.shape[1]
     cardinalities = list(matrix.cardinalities)
 
@@ -486,15 +558,36 @@ def train_autoencoder(
     rows = matrix.rows
     generator = torch.Generator(device="cpu").manual_seed(seed)
 
+    # What the model learns from. An autoencoder over HR records converges on
+    # the shape of a normal record, and a sample of a hundred and fifty
+    # thousand of them describes that shape as well as a million does -- while
+    # a million is 245 optimiser steps an epoch instead of 37, which is the
+    # difference between a run that fits in fifteen minutes and one that does
+    # not. Every employee is still *scored*; only the fitting is sampled.
+    max_train = int(config.get("max_train_rows") or 0)
+    if max_train and rows > max_train:
+        # Seeded and sorted, so two runs over one lake train on exactly the
+        # same records in exactly the same order.
+        chosen = np.sort(
+            np.random.default_rng(seed).choice(rows, size=max_train, replace=False)
+        )
+        index_tensor = torch.from_numpy(chosen)
+        train_numeric = numeric_tensor.index_select(0, index_tensor).to(resolved)
+        train_codes = category_tensor.index_select(0, index_tensor).to(resolved)
+    else:
+        train_numeric = numeric_tensor.to(resolved)
+        train_codes = category_tensor.to(resolved)
+    train_rows = train_numeric.shape[0]
+
     final_loss = 0.0
     model.train()
     for _epoch in range(epochs):
-        order = torch.randperm(rows, generator=generator).to(resolved)
+        order = torch.randperm(train_rows, generator=generator).to(resolved)
         total, batches = 0.0, 0
-        for start in range(0, rows, batch_size):
+        for start in range(0, train_rows, batch_size):
             index = order[start : start + batch_size]
-            values = numeric_tensor[index]
-            codes = category_tensor[index]
+            values = train_numeric[index]
+            codes = train_codes[index]
             # Denoising: blank part of the row before the encoder sees it, so
             # the model has to learn what the rest of a record implies rather
             # than copy its input straight through to the output.
@@ -510,14 +603,18 @@ def train_autoencoder(
             batches += 1
         final_loss = total / max(batches, 1)
 
+    del train_numeric, train_codes
+    if resolved.startswith("cuda"):
+        torch.cuda.empty_cache()
+
     model.eval()
     gaps: list[np.ndarray] = []
     above: list[np.ndarray] = []
     with torch.no_grad():
         for start in range(0, rows, batch_size):
             stop = min(start + batch_size, rows)
-            values = numeric_tensor[start:stop]
-            codes = category_tensor[start:stop]
+            values = numeric_tensor[start:stop].to(resolved)
+            codes = category_tensor[start:stop].to(resolved)
             predicted, logits = model(values, codes)
             numeric_gap = (predicted - values).pow(2)
             category_gap = []
@@ -538,7 +635,8 @@ def train_autoencoder(
             above.append((values > predicted).cpu().numpy())
 
     if log:
-        log(f"  autoencoder  {rows:,} rows on {resolved}, {epochs} epochs, "
+        trained = "" if train_rows == rows else f" (fitted on {train_rows:,})"
+        log(f"  autoencoder  {rows:,} rows on {resolved}{trained}, {epochs} epochs, "
             f"loss {final_loss:.4f}")
     return np.vstack(gaps), np.vstack(above), resolved, float(final_loss), epochs
 
@@ -546,6 +644,20 @@ def train_autoencoder(
 # --------------------------------------------------------------------------
 # Attribution
 # --------------------------------------------------------------------------
+
+
+def _display_value(value):
+    """The value behind an attribution, as a reviewer would write it down.
+
+    Numeric columns are read from the model's own matrix, which is float
+    throughout; a grade of 5 must still read as 5 rather than 5.0, so a value
+    that is a whole number is rendered as one.
+    """
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, float) and value.is_integer() and abs(value) < 1e15:
+        return int(value)
+    return value
 
 
 def _attribution_json(
@@ -577,7 +689,7 @@ def _attribution_json(
         if share < min_share:
             continue
         name = names[index]
-        value = matrix.values[name][row]
+        value = _display_value(matrix.values[name][row])
         if index < numeric_count:
             direction = "increases" if bool(above[row, index]) else "reduces"
         else:
@@ -634,10 +746,23 @@ def fit(
 
     top_n = int(autoencoder["attribution_top_n"])
     min_share = float(autoencoder["attribution_min_share"])
-    payload = [
-        _attribution_json(matrix, gap, above, row, top_n, min_share)
-        for row in range(matrix.rows)
-    ]
+    # An attribution is a paragraph of evidence, built one record at a time in
+    # Python. Only the strangest records are ever read -- fusion ignores the
+    # models below `layer_contribution.ml_unsupervised_min_score` and nothing
+    # renders an explanation for a record nobody was shown -- so the list is
+    # built for the top of the population and left empty below it. At 10k the
+    # cap does not bind and every employee still carries one.
+    limit = int(autoencoder.get("attribution_max_rows") or 0)
+    if limit and matrix.rows > limit:
+        explained = np.argpartition(-ml_score, limit - 1)[:limit]
+    else:
+        explained = np.arange(matrix.rows)
+    payload = [""] * matrix.rows
+    for row in explained:
+        payload[int(row)] = _attribution_json(
+            matrix, gap, above, int(row), top_n, min_share
+        )
+    result_attributed = len(explained)
 
     import pyarrow as pa
 
@@ -674,6 +799,7 @@ def fit(
         forest_seconds=forest_seconds,
         autoencoder_seconds=autoencoder_seconds,
         seconds=round(time.perf_counter() - started, 3),
+        attributed=int(result_attributed),
         table=table,
     )
     if log:

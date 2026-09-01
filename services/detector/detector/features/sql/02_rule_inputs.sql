@@ -230,15 +230,15 @@ SELECT
     coalesce(al.allowance_offpolicy_delta_total, 0)      AS allowance_offpolicy_delta_total,
     coalesce(al.non_severance_allowance_count, 0)        AS non_severance_allowance_count
 
-FROM asat s
+FROM (SELECT * FROM asat WHERE TRUE $period_filter) s
 JOIN employee_master e USING (employee_id)
 LEFT JOIN dim_site st ON st.site_id = s.asat_site_id
 LEFT JOIN dim_job j ON j.job_code = s.asat_job_code
 LEFT JOIN dim_org_unit o ON o.org_unit_id = s.asat_org_unit_id
 LEFT JOIN dim_grade g ON g.grade = s.asat_grade
                      AND g.nationality_class = e.nationality_class
-LEFT JOIN fact_payroll_monthly p USING (employee_id, period)
-LEFT JOIN fact_attendance_monthly att USING (employee_id, period)
-LEFT JOIN fact_system_activity_monthly ac USING (employee_id, period)
+LEFT JOIN (SELECT * FROM fact_payroll_monthly WHERE TRUE $period_filter) p USING (employee_id, period)
+LEFT JOIN (SELECT * FROM fact_attendance_monthly WHERE TRUE $period_filter) att USING (employee_id, period)
+LEFT JOIN (SELECT * FROM fact_system_activity_monthly WHERE TRUE $period_filter) ac USING (employee_id, period)
 LEFT JOIN previous_site prev USING (employee_id)
-LEFT JOIN allowance_pivot al USING (employee_id, period);
+LEFT JOIN (SELECT * FROM allowance_pivot WHERE TRUE $period_filter) al USING (employee_id, period);

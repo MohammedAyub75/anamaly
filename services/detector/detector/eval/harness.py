@@ -196,6 +196,12 @@ class EvalReport:
     severity_budget: dict[str, float]
     impact_total: float
     runtime: dict[str, float]
+    # One entry per scale tier that has been run, from
+    # `data/runs/runtime_profile.json`. The spec asks the report for a runtime
+    # profile "per stage at each scale tier", and a tier is only ever measured
+    # by having been run -- so the profile accumulates across sessions rather
+    # than being rebuilt by a run that only knows about its own scale.
+    profiles: dict[str, dict]
     policy_digest: dict[str, str]
     rule_digest: str
     unlabelled_hits: int
@@ -544,6 +550,7 @@ def evaluate(
     *,
     planned: dict[str, str] | None = None,  # defaults to PLANNED
     runtime: dict[str, float] | None = None,
+    profiles: dict[str, dict] | None = None,
     policy_digest: dict[str, str] | None = None,
     rule_digest: str = "",
 ) -> EvalReport:
@@ -607,6 +614,7 @@ def evaluate(
         severity_budget=fusion_budget,
         impact_total=float(impact[0]) if impact else 0.0,
         runtime=dict(runtime or {}),
+        profiles=dict(profiles or {}),
         policy_digest=dict(policy_digest or {}),
         rule_digest=rule_digest,
         unlabelled_hits=int(unlabelled[0]) if unlabelled else 0,

@@ -15,9 +15,15 @@ from typing import Any
 Key = tuple[str, int]  # (employee_id, period)
 
 
-@dataclass
+@dataclass(slots=True)
 class AllowanceRow:
-    """One `fact_payroll_allowance` row, without its employee/period key."""
+    """One `fact_payroll_allowance` row, without its employee/period key.
+
+    Slotted because there are a great many of them: pass 2 holds every
+    allowance row of every employee it looks at, which at 1m is millions of
+    objects, and a slotted instance is a third of the size of one carrying a
+    `__dict__`.
+    """
 
     code: str
     cents: int

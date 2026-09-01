@@ -60,6 +60,10 @@ class SalaryExpectation:
 
     drivers: tuple[str, ...]
     rows: int
+    # How many of those rows carry a per-driver attribution. Below `rows` once
+    # `attribution_max_rows` binds -- a record the model accounts for has no
+    # gap to explain.
+    attributed: int
     baseline: float
     method: str
     mae: float
@@ -77,10 +81,11 @@ def _encode(values: np.ndarray) -> np.ndarray:
 
     Sorted, so the encoding depends on the values and not on row order: two runs
     over the same lake must fit the same model and quote the same figures.
+    `np.unique` does both passes in C, which at 1m is three million fewer
+    dictionary lookups than the equivalent comprehension.
     """
-    levels = np.unique(values.astype(str))
-    lookup = {level: i for i, level in enumerate(levels)}
-    return np.array([lookup[str(v)] for v in values], dtype=np.float64)
+    _levels, codes = np.unique(values.astype(str), return_inverse=True)
+    return codes.astype(np.float64)
 
 
 def _matrix(rows: dict[str, np.ndarray], drivers: tuple[str, ...]) -> np.ndarray:
@@ -102,7 +107,9 @@ def _treeshap(model, matrix: np.ndarray) -> tuple[np.ndarray, float]:
     return values, float(np.asarray(explainer.expected_value).ravel()[0])
 
 
-def _baseline_attributions(model, matrix: np.ndarray) -> tuple[np.ndarray, float]:
+def _baseline_attributions(
+    model, matrix: np.ndarray, medians: np.ndarray | None = None
+) -> tuple[np.ndarray, float]:
     """Fallback attribution with the same additive guarantee as TreeSHAP.
 
     Each driver is replaced, one at a time, by the population median and the
@@ -112,7 +119,9 @@ def _baseline_attributions(model, matrix: np.ndarray) -> tuple[np.ndarray, float
     but it is deterministic, needs no extra dependency, and keeps the identity
     the evidence bundle and the reviewer's sentence both rely on.
     """
-    medians = np.median(matrix, axis=0)
+    # The population's median record, not the explained subset's: the point of
+    # reference a contribution is measured from must be the same for everybody.
+    medians = np.median(matrix, axis=0) if medians is None else medians
     predicted = model.predict(matrix)
     neutral = np.tile(medians, (matrix.shape[0], 1))
     baseline = float(model.predict(neutral[:1])[0])
@@ -133,15 +142,21 @@ def _attribution_json(
     drivers: tuple[str, ...],
     contributions: np.ndarray,
     values: dict[str, np.ndarray],
-    row: int,
+    position: int,
     top_n: int,
     min_sar: float,
+    row: int | None = None,
 ) -> str:
-    """The `feature_attributions` array of the evidence bundle, in SAR."""
-    order = np.argsort(-np.abs(contributions[row]))
+    """The `feature_attributions` array of the evidence bundle, in SAR.
+
+    `position` indexes the explained rows, `row` the population. They differ
+    once `attribution_max_rows` binds and only some records are explained.
+    """
+    row = position if row is None else row
+    order = np.argsort(-np.abs(contributions[position]))
     out = []
     for index in order[:top_n]:
-        amount = float(contributions[row, index])
+        amount = float(contributions[position, index])
         if abs(amount) < min_sar:
             continue
         name = drivers[index]
@@ -202,22 +217,41 @@ def fit(
     )
     model.fit(matrix, actual)
     predicted = model.predict(matrix)
+    residual = actual - predicted
+
+    # TreeSHAP over a million records costs minutes and is read for a few
+    # hundred: an attribution exists to explain a *gap*, and a record the model
+    # accounts for has no gap to explain. The rows explained are therefore the
+    # widest residuals, capped by `attribution_max_rows`. At 10k the cap is
+    # above the population and every employee still carries one.
+    limit = int(config.get("attribution_max_rows") or 0)
+    if limit and rows > limit:
+        chosen = np.sort(np.argpartition(-np.abs(residual), limit - 1)[:limit])
+    else:
+        chosen = np.arange(rows)
+    subset = matrix[chosen]
 
     try:
-        contributions, baseline = _treeshap(model, matrix)
+        contributions, baseline = _treeshap(model, subset)
         method = "treeshap"
     except Exception as exc:  # noqa: BLE001 - any explainer failure falls back
         if log:
             log(f"  shap unavailable ({type(exc).__name__}); "
                 "using the deterministic baseline attribution")
-        contributions, baseline = _baseline_attributions(model, matrix)
+        contributions, baseline = _baseline_attributions(
+            model, subset, medians=np.median(matrix, axis=0)
+        )
         method = "baseline-substitution"
 
     # The identity the reviewer's sentence rests on. Restated per row rather
     # than assumed: an attribution that does not add up is worse than none.
-    explained = contributions.sum(axis=1)
-    residual = actual - predicted
-    drift = float(np.max(np.abs(baseline + explained - predicted))) if rows else 0.0
+    explained = np.zeros(rows, dtype=np.float64)
+    explained[chosen] = contributions.sum(axis=1)
+    drift = (
+        float(np.max(np.abs(baseline + explained[chosen] - predicted[chosen])))
+        if len(chosen)
+        else 0.0
+    )
     if drift > 1.0:
         raise ValueError(
             f"{method} attributions do not reconstruct the prediction "
@@ -226,10 +260,11 @@ def fit(
 
     top_n = int(config["attribution_top_n"])
     min_sar = float(config["attribution_min_sar"])
-    payload = [
-        _attribution_json(drivers, contributions, values, i, top_n, min_sar)
-        for i in range(rows)
-    ]
+    payload = [""] * rows
+    for position, row in enumerate(chosen):
+        payload[int(row)] = _attribution_json(
+            drivers, contributions, values, position, top_n, min_sar, row=int(row)
+        )
 
     import pyarrow as pa
 
@@ -255,6 +290,7 @@ def fit(
     result = SalaryExpectation(
         drivers=drivers,
         rows=rows,
+        attributed=len(chosen),
         baseline=round(baseline, 2),
         method=method,
         mae=round(float(np.mean(np.abs(residual))), 2),

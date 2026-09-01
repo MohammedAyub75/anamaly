@@ -51,8 +51,12 @@ in `policy/fusion.yaml` — tune the config, never a literal in code.
 
 ### 5. Runtime profile
 
-Per stage, per scale tier. Watch for a stage growing superlinearly — that is what breaks the 15
-minute target at 1M, and it is always visible at 100k first.
+Per stage, per scale tier, from `data/runs/runtime_profile.json` — a tier appears once it has been
+run, and each entry carries the peak resident set the batch was sampled at. Watch for a stage
+growing superlinearly: that is what breaks the 15 minute target at 1M, and it is always visible at
+100k first. Phase 7 found two that way — an `OR` in a join condition that DuckDB could not hash
+(a second at 10k, ninety-six at 100k) and a wide table that fitted in memory at 100k and did not at
+1m.
 
 ## Interpreting a change
 

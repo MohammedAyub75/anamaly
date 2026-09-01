@@ -23,7 +23,7 @@ SELECT a.employee_id,
        (($expected_case) > 0 AND abs(a.amount - ($expected_case)) > $tolerance)
            AS off_policy_amount,
        a.eligibility_snapshot_json
-FROM fact_payroll_allowance a
+FROM (SELECT * FROM fact_payroll_allowance WHERE TRUE $period_filter) a
 JOIN asat s USING (employee_id, period);
 
 -- The per-month roll-up the wide table carries. Kept here beside the long form
@@ -44,4 +44,5 @@ SELECT employee_id,
        count(*) FILTER (WHERE amount > 0 AND allowance_code <> 'SEVERANCE')
            AS non_severance_allowance_count
 FROM allowance_features
+WHERE TRUE $period_filter
 GROUP BY employee_id, period;

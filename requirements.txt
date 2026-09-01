@@ -21,6 +21,12 @@ jsonschema>=4.23
 # torch is intentionally NOT pinned here: the CUDA build must be installed for
 # the platform's driver (see docs/RUNBOOK.md). The CPU path must also work.
 
+# --- phase 7: scale-up -----------------------------------------------------
+# The batch samples its own resident set so the phase-7 gate can hold a 1m run
+# to a memory budget. Without it the run still works and simply reports no
+# peak -- which the gate then refuses to accept as evidence.
+psutil>=6.0
+
 # --- phase 8: api ----------------------------------------------------------
 fastapi>=0.115
 uvicorn[standard]>=0.32

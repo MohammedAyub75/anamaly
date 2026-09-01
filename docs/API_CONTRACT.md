@@ -122,6 +122,23 @@ turn every heat map into a population map (`docs/PLAN.md` §11).
 Served entirely from `agg_alerts_by_site_month`, written during the batch. Each frame is a small
 pre-computed payload — that is what makes the 24-month animation smooth.
 
+The detector writes it (phase 7) to
+`data/runs/scale=<n>/run_id=<id>/agg_alerts_by_site_month.parquet`, and phase 8 upserts that file
+into the table of the same name. Three things the endpoint has to know about its shape:
+
+- **The grain is (period, site_id, anomaly_code)**, so `family` and `anomaly_code` filters are a
+  `WHERE` rather than a re-aggregation.
+- **The site-month total is the row whose `anomaly_code` is `'*'`** (`family` likewise). The default
+  frame — no code filter — is `WHERE anomaly_code = '*'`, one row per site, and that row carries the
+  severity mix and `top_codes`. Summing the code rows instead would give the same numbers; the total
+  row exists so the default frame never has to.
+- **`alerts_per_1000` and `headcount` are stored, not derived.** The denominator is the site's
+  headcount *that month*, and an alert counts in every month of its window at the site the employee
+  was at that month.
+
+A region frame is the sum of its sites: `region_code` is on every row, and per-1,000 for a region is
+`sum(alert_count) * 1000 / sum(headcount)` over the sites in it — never an average of rates.
+
 ### Explanation
 
 | Method | Path | Purpose |

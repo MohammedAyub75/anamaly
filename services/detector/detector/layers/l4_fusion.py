@@ -402,10 +402,15 @@ def _display_rows(
     con: duckdb.DuckDBPyConnection, employees: list[str]
 ) -> dict[str, dict]:
     """Everything the bundle denormalises about an employee, in one query."""
-    con.execute("CREATE OR REPLACE TEMP TABLE alert_employees (employee_id VARCHAR)")
-    con.executemany(
-        "INSERT INTO alert_employees VALUES (?)", [(e,) for e in employees]
+    import pyarrow as pa
+
+    con.register("alert_employees_arrow", pa.table({"employee_id": pa.array(
+        list(employees), pa.string())}))
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE alert_employees AS "
+        "SELECT * FROM alert_employees_arrow"
     )
+    con.unregister("alert_employees_arrow")
     rows = con.execute(
         """
         SELECT e.employee_id, e.name_en, e.name_ar, e.badge_no, e.grade,
@@ -655,13 +660,21 @@ def run_fusion(
         item["rank_in_band"] = rank[item["severity"]]
 
     # ------------------------------------------------- 6. the evidence bundle
-    employees = sorted({i["employee_id"] for i in staged})
-    display = _display_rows(con, employees) if employees else {}
-    series = _timelines(con, cfg.period_list) if employees else {}
-
     by_code_alerts: dict[str, list[dict]] = {}
     for item in staged:
         by_code_alerts.setdefault(item["code"], []).append(item)
+
+    # The five comparable cases each alert points at, resolved once per code
+    # rather than once per alert: the same sort inside the bundle loop is
+    # quadratic, which is invisible at three hundred alerts and is minutes at
+    # thirty-five thousand. Six are kept so that removing self still leaves five.
+    similar_by_code = {
+        code: [
+            other["alert_id"]
+            for other in sorted(items, key=lambda o: -o["score"])[:6]
+        ]
+        for code, items in by_code_alerts.items()
+    }
 
     scored_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     digest = json.dumps(policy.digest, sort_keys=True)
@@ -670,18 +683,29 @@ def run_fusion(
     )
     packs = "sha256:" + hashlib.sha256(digest.encode("utf-8")).hexdigest()
 
-    for item in ordered:
+    # A bundle carries a 24-month timeline and a denormalised employee, so the
+    # lake is read a chunk of alerts at a time rather than for the whole queue:
+    # the peak is then one chunk's worth of rows whatever the scale, which is
+    # what keeps 35,000 bundles inside the run's memory budget at 1m.
+    chunk_size = max(1, int(getattr(policy, "bundle_chunk_alerts", 4000)))
+    display: dict[str, dict] = {}
+    series: dict[str, dict[int, dict]] = {}
+
+    for position, item in enumerate(ordered):
+        if position % chunk_size == 0:
+            chunk = ordered[position : position + chunk_size]
+            in_chunk = sorted({i["employee_id"] for i in chunk})
+            display = _display_rows(con, in_chunk)
+            series = _timelines(con, cfg.period_list)
         code = item["code"]
         window = (
             item["impact"]["periods_affected"]["from"],
             item["impact"]["periods_affected"]["to"],
         )
         similar = [
-            other["alert_id"]
-            for other in sorted(
-                by_code_alerts[code], key=lambda o: -o["score"]
-            )
-            if other["alert_id"] != item["alert_id"]
+            alert_id
+            for alert_id in similar_by_code[code]
+            if alert_id != item["alert_id"]
         ][:5]
         corroboration = _corroborating_reasons(policy, item, hits, per_employee)
         impact = {k: v for k, v in item["impact"].items() if not k.startswith("_")}

@@ -12,6 +12,7 @@ Only `connect_labels()`, which lives behind `detector.eval`, can see them.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 
 import duckdb
 
@@ -62,13 +63,29 @@ def connect(
     features: bool = False,
     threads: int | None = None,
     memory_limit: str | None = None,
+    policy=None,
 ) -> duckdb.DuckDBPyConnection:
-    """A connection with one view per raw table, and no view over ground truth."""
+    """A connection with one view per raw table, and no view over ground truth.
+
+    `policy` supplies the engine budget from `policy/runtime.yaml` when the
+    caller does not override it: a memory limit and a temp directory to spill
+    into.  At 1m a hash join over 24 million payroll rows will not fit in RAM
+    on a 16 GB machine, and an engine told its budget spills to disk and
+    finishes, where an engine left to guess is killed by the OS.
+    """
     con = duckdb.connect()
+    if threads is None and policy is not None:
+        threads = policy.duckdb_threads
+    if memory_limit is None and policy is not None:
+        memory_limit = policy.duckdb_memory_limit
     if threads is not None:
         con.execute(f"SET threads TO {int(threads)}")
     if memory_limit is not None:
         con.execute(f"SET memory_limit = '{memory_limit}'")
+    if policy is not None and policy.duckdb_temp_directory:
+        spill = Path(policy.duckdb_temp_directory)
+        spill.mkdir(parents=True, exist_ok=True)
+        con.execute(f"SET temp_directory = '{str(spill).replace(chr(92), '/')}'")
     for table in RAW_TABLES:
         _view(con, table, cfg.raw_glob(table))
     if features:
@@ -87,13 +104,13 @@ def attach_features(
             _view(con, table, cfg.feature_glob(table))
 
 
-def connect_labels(cfg: DetectorConfig) -> duckdb.DuckDBPyConnection:
+def connect_labels(cfg: DetectorConfig, *, policy=None) -> duckdb.DuckDBPyConnection:
     """The evaluation harness's connection: raw + features + ground truth.
 
     Importing this anywhere outside `detector.eval` is a bug, and the phase-3
     gate greps for exactly that.
     """
-    con = connect(cfg, features=True)
+    con = connect(cfg, features=True, policy=policy)
     for table in LABEL_TABLES:
         _view(con, table, cfg.raw_glob(table))
     return con

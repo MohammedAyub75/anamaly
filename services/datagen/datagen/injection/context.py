@@ -223,6 +223,37 @@ class Context:
                               order="employee_id, period"):
             self._activity[(row["employee_id"], row["period"])] = row
 
+    def release(self) -> None:
+        """Drop the working copies of employees nothing was written for.
+
+        An injector loads about four candidates for every victim it ends up
+        with -- it has to look at a record before it can tell whether the case
+        it wants is there -- and at 1m that is a hundred and seventy thousand
+        employees' payroll, allowances, attendance and activity held for the
+        length of pass 2, which is most of a twelve-gigabyte budget.
+
+        Only untouched employees are released, so this cannot change a single
+        row: an employee with no edit re-reads from the lake identically, and
+        the lake is not rewritten until every injector has finished. An
+        employee that *has* been edited stays, because their working copy is
+        the only place that edit exists until then.
+        """
+        keep = self.edits.touched_employees()
+        drop = self._loaded - keep
+        if not drop:
+            return
+        for employee in drop:
+            self._master.pop(employee, None)
+            self._history.pop(employee, None)
+            self._payroll.pop(employee, None)
+            self._bank.pop(employee, None)
+            for period in self.periods:
+                key = (employee, period)
+                self._allow.pop(key, None)
+                self._attend.pop(key, None)
+                self._activity.pop(key, None)
+        self._loaded -= drop
+
     def _rows(self, table: str, columns: str, where: str, order: str = "") -> list[dict]:
         sql = f"SELECT {columns} FROM {table} WHERE {where}"
         if order:

@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Self
 
 import polars as pl
 
+from .aggregate import AGG_FILE, AggregateResult
+from .aggregate import build as build_aggregate
 from .config import DetectorConfig
 from .features.build import build as build_features
 from .features.build import cache_key as features_cache_key
@@ -29,9 +33,9 @@ from .layers.l4_fusion import L4Result, ScoredAlert, run_fusion
 
 # In execution order. Later stages are declared here so `--stages` has a stable
 # surface and asking for one that is not built yet fails loudly.
-STAGES: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion")
+STAGES: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion", "agg")
 
-BUILT: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion")
+BUILT: tuple[str, ...] = ("features", "l1", "l2", "l3", "fusion", "agg")
 
 STAGE_PHASE: dict[str, int] = {}
 
@@ -47,6 +51,13 @@ STATE_FILE = "_stages.json"
 # there is something to suppress is a rule that is first exercised in
 # production.
 DISMISSALS_FILE = "dismissals.parquet"
+
+# The runtime profile per scale tier, which `docs/EVAL_REPORT.md` section 5
+# reports. Kept beside the runs rather than inside one of them: the question it
+# answers -- "what does this stage cost as the population grows?" -- is about
+# the tiers together, and a profile that lived in a run directory would be
+# thrown away by the next run at that scale.
+PROFILE_FILE = "runtime_profile.json"
 
 
 class StageNotBuilt(RuntimeError):
@@ -67,11 +78,13 @@ class RunResult:
     l2: L2Result | None = None
     l3: L3Result | None = None
     l4: L4Result | None = None
+    agg: AggregateResult | None = None
     hits_path: Path | None = None
     l2_hits_path: Path | None = None
     l3_hits_path: Path | None = None
     l3_scores_path: Path | None = None
     alerts_path: Path | None = None
+    agg_path: Path | None = None
 
     @property
     def findings(self) -> list[dict]:
@@ -138,6 +151,19 @@ def layer4_digest(policy) -> str:
     digest.update((evidence / "builder.py").read_bytes())
     digest.update((evidence / "schemas" / "evidence_v1.json").read_bytes())
     digest.update(json.dumps(policy.fusion, sort_keys=True).encode("utf-8"))
+    return "sha256:" + digest.hexdigest()
+
+
+def aggregate_digest(policy) -> str:
+    """A hash over the map aggregate and the dials that shape it.
+
+    `runtime.yaml` is not in `policy_digest` -- it cannot change what the
+    detector says -- but `aggregate.top_codes` does change what this file
+    contains, so the stage that writes it keys on it.
+    """
+    digest = hashlib.sha256()
+    digest.update((Path(__file__).parent / "aggregate.py").read_bytes())
+    digest.update(json.dumps(policy.aggregate, sort_keys=True).encode("utf-8"))
     return "sha256:" + digest.hexdigest()
 
 
@@ -369,6 +395,152 @@ def read_dismissals(cfg: DetectorConfig) -> list[dict]:
     return pl.read_parquet(path).to_dicts()
 
 
+class PeakMemory:
+    """Samples this process's resident set while a batch runs.
+
+    The phase-7 budget is a statement about the machine, not about any one
+    allocation, so it is measured the way the operating system sees it and not
+    inferred from array sizes. Sampling rather than instrumenting: a model fit
+    is one call that holds its own peak for seconds, and there is nothing
+    useful to instrument inside it.
+
+    Without `psutil` the run still works and simply reports no peak, which the
+    gate then refuses to accept as evidence.
+    """
+
+    def __init__(self, interval: float = 0.25) -> None:
+        self.interval = float(interval)
+        self.peak_bytes = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.error = ""
+        self._process = None
+        try:
+            import psutil
+
+            self._process = psutil.Process()
+        except ImportError:  # pragma: no cover - environment guard
+            self._process = None
+
+    @property
+    def available(self) -> bool:
+        return self._process is not None
+
+    @property
+    def peak_gb(self) -> float | None:
+        return round(self.peak_bytes / 1e9, 3) if self.peak_bytes else None
+
+    def _sample(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.peak_bytes = max(
+                    self.peak_bytes, int(self._process.memory_info().rss)
+                )
+            except Exception:  # noqa: BLE001 - a dead process ends the sampling
+                return
+            self._stop.wait(self.interval)
+
+    def __enter__(self) -> Self:
+        if self._process is not None:
+            self._thread = threading.Thread(target=self._sample, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        if self._thread is None:
+            return
+        self._thread.join(timeout=self.interval * 4)
+        try:
+            self.peak_bytes = max(
+                self.peak_bytes, int(self._process.memory_info().rss)
+            )
+        except Exception as exc:  # noqa: BLE001 - a last sample is a bonus
+            self.error = str(exc)
+
+
+def load_profiles(runs_root: Path | str) -> dict[str, dict]:
+    """Every scale tier's last runtime profile, newest write wins."""
+    path = Path(runs_root) / PROFILE_FILE
+    if not path.exists():
+        return {}
+    try:
+        return dict(json.loads(path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError:
+        return {}
+
+
+def record_profile(
+    cfg: DetectorConfig,
+    result: RunResult,
+    *,
+    peak_rss_gb: float | None = None,
+    employees: int | None = None,
+) -> Path:
+    """Record what this run cost, per stage, under its scale tier.
+
+    A stage that was reused is recorded under its own name with the time it
+    cost the day it really ran (`RunResult` keeps that, not the cost of
+    noticing the cache was good), and named in `cached` so nobody reads the
+    total as a stopwatch. That is what makes `stage_seconds_total` the cost of
+    a cold run even when the run that wrote it reused the feature store -- and
+    a feature build is reused for a month at a time in production, so demanding
+    a genuinely cold run to measure one would mean rebuilding twenty-four
+    million rows to time work that has not changed.
+    """
+    path = Path(cfg.runs_root) / PROFILE_FILE
+    profiles = load_profiles(cfg.runs_root)
+    # What this tier already knows, kept only while it is about the same lake
+    # under the same policy. A run of one stage records that stage and leaves
+    # the others as they were last measured -- otherwise `--stages agg` would
+    # erase the profile of the batch that produced the alerts it aggregated.
+    previous = profiles.get(cfg.scale) or {}
+    if (
+        previous.get("lake_generated_at") != str(cfg.manifest.get("generated_at", ""))
+        or previous.get("policy_digest") != dict(cfg.policy_digest)
+    ):
+        previous = {}
+    stages = {
+        name.replace(" (cached)", ""): round(float(seconds), 3)
+        for name, seconds in result.stage_seconds.items()
+    }
+    cached = [
+        name.replace(" (cached)", "")
+        for name in result.stage_seconds
+        if "(cached)" in name
+    ]
+    stages = {**(previous.get("stages") or {}), **stages}
+    entry = {
+        "scale": cfg.scale,
+        "run_id": cfg.run_id,
+        "employees": int(employees if employees is not None else cfg.employees),
+        # The wall clock of this run, and what the same work costs from cold.
+        "seconds": float(result.seconds),
+        "stage_seconds_total": round(sum(stages.values()), 3),
+        "cached": sorted(cached),
+        # What the profile was measured against. A budget met under a different
+        # lake or a different policy pack is not evidence about this one, and
+        # the phase gate says so rather than reporting a stale pass.
+        "lake_generated_at": str(cfg.manifest.get("generated_at", "")),
+        "policy_digest": dict(cfg.policy_digest),
+        "stages": stages,
+        "rows": {k: int(v) for k, v in result.rows.items()},
+        "alerts": len(result.l4.alerts) if result.l4 else 0,
+        "findings": len(result.findings),
+    }
+    # The high-water mark for this lake, not for this invocation: a run whose
+    # stages were all cached costs nothing and proves nothing about the budget.
+    peaks = [float(previous["peak_rss_gb"])] if previous.get("peak_rss_gb") else []
+    if peak_rss_gb is not None:
+        peaks.append(float(peak_rss_gb))
+    if peaks:
+        entry["peak_rss_gb"] = round(max(peaks), 2)
+    profiles[cfg.scale] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(profiles, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
 def run(
     cfg: DetectorConfig,
     policy,
@@ -414,7 +586,7 @@ def run(
                 log(f"l1        {len(result.l1.hits):,} findings  (cached)")
         else:
             ruleset.check_columns(feature_columns(cfg))
-            con = connect(cfg, features=True, threads=threads)
+            con = connect(cfg, features=True, threads=threads, policy=policy)
             try:
                 ruleset.check_executable(con)
                 l1 = run_rules(con, ruleset, log=log)
@@ -443,7 +615,7 @@ def run(
             if log:
                 log(f"l2        {len(result.l2.hits):,} findings  (cached)")
         else:
-            con = connect(cfg, features=True, threads=threads)
+            con = connect(cfg, features=True, threads=threads, policy=policy)
             try:
                 l2 = run_peer(con, policy, log=log)
             finally:
@@ -478,7 +650,7 @@ def run(
             if log:
                 log(f"l3        {len(result.l3.hits):,} findings  (cached)")
         else:
-            con = connect(cfg, features=True, threads=threads)
+            con = connect(cfg, features=True, threads=threads, policy=policy)
             try:
                 l3 = run_l3(con, policy, log=log)
             finally:
@@ -528,7 +700,7 @@ def run(
                     "first, or drop --stages to run the whole batch"
                 )
             scores_path = result.l3_scores_path or (cfg.run_dir / L3_SCORES_FILE)
-            con = connect(cfg, features=True, threads=threads)
+            con = connect(cfg, features=True, threads=threads, policy=policy)
             try:
                 l4 = run_fusion(
                     con, cfg, policy,
@@ -550,6 +722,33 @@ def run(
             _save_state(cfg, state)
             if log:
                 log(f"fusion    {l4.total:,} alerts  {l4.seconds:.2f}s")
+
+    if "agg" in wanted and (policy.aggregate.get("enabled", True)):
+        # Keyed on the queue it aggregates: a re-scored run must not be
+        # described by the previous run's map frames.
+        key = "|".join([str(state.get("fusion")), aggregate_digest(policy), cfg.run_id])
+        cached = cfg.run_dir / AGG_FILE
+        if not force and state.get("agg") == key and cached.exists():
+            result.agg_path = cached
+            result.stage_seconds["agg (cached)"] = float(state.get("agg_seconds", 0.0))
+            result.stage_cached["agg"] = True
+            if log:
+                log("agg       map frames  (cached)")
+        else:
+            con = connect(cfg, features=True, threads=threads, policy=policy)
+            try:
+                agg = build_aggregate(con, cfg, policy, log=log)
+            finally:
+                con.close()
+            result.agg = agg
+            result.agg_path = agg.path
+            result.stage_seconds["agg"] = agg.seconds
+            result.stage_cached["agg"] = False
+            state["agg"] = key
+            state["agg_seconds"] = agg.seconds
+            _save_state(cfg, state)
+            if log:
+                log(f"agg       {agg.rows:,} site-months  {agg.seconds:.2f}s")
 
     result.seconds = round(time.perf_counter() - started, 3)
     return result

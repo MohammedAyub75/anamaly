@@ -117,7 +117,15 @@ class DetectorConfig:
 
     @property
     def run_dir(self) -> Path:
-        return self.runs_root / f"run_id={self.run_id}"
+        """`data/runs/scale=<n>/run_id=<id>/`.
+
+        Partitioned by scale like the lake and the feature store (phase 7). The
+        default run id is the last period in the window, which is the same
+        string at every tier, so without this a 10k run and a 1m run of the same
+        month would write their alerts over each other -- and the second one
+        would look like a successful run of the first.
+        """
+        return self.runs_root / f"scale={self.scale}" / f"run_id={self.run_id}"
 
     @property
     def features_manifest(self) -> Path:

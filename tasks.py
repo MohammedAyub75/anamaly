@@ -1540,6 +1540,419 @@ def verify_6() -> int:
     return gate.report()
 
 
+def _sample_bundles(path, limit: int = 250) -> list[dict]:
+    """A deterministic spread of evidence bundles from a run's alerts file.
+
+    Every bundle at 1m is 35,000 JSON documents and a few hundred megabytes;
+    a spread across the queue in alert-id order is the same evidence about the
+    shape of them, and it is the same spread on every machine.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        rows = con.execute(
+            "SELECT evidence_json FROM (SELECT evidence_json, "
+            "row_number() OVER (ORDER BY alert_id) AS n, "
+            "count(*) OVER () AS total FROM read_parquet(?)) "
+            "WHERE n % greatest(CAST(total / ? AS BIGINT), 1) = 0 LIMIT ?",
+            [str(path).replace("\\", "/"), limit, limit],
+        ).fetchall()
+    finally:
+        con.close()
+    return [json.loads(row[0]) for row in rows]
+
+
+def verify_7() -> int:
+    """Phase-7 gate: the full 1m run, its budget, and the map aggregate.
+
+    The spec's claim for this phase is one line -- a full 1M run under fifteen
+    minutes with peak RAM under twelve gigabytes -- plus the pre-aggregated
+    table the map is served from.  Both halves are checked against a run that
+    actually happened: the batch records what each stage cost and what the
+    process peaked at, and this gate reads that profile rather than spending
+    fifteen minutes reproducing it.  A profile recorded against a different
+    lake or a different policy pack is refused, because a budget met under
+    other conditions is not evidence about these.
+
+    Everything else here exists to stop the headline being true for the wrong
+    reason: that the run got quick by finding less, that the caps which make 1m
+    affordable quietly moved the answers at 10k, or that the map frames
+    describe a different queue from the one that was written.
+    """
+    _add_service_paths()
+    import duckdb
+    from detector.aggregate import AGG_FILE, AGG_SCHEMA, TOTAL
+    from detector.config import DetectorConfig, LakeError
+    from detector.evidence.builder import EvidenceError, validate
+    from detector.policy import DetectorPolicy
+    from detector.run import ALERTS_FILE, load_profiles
+
+    from policycore import runtime as runtime_pack
+    from policycore.packs import POLICY_FILES
+
+    gate = Gate(7, PHASE_TITLES[7])
+    policy = DetectorPolicy.load(ROOT / "policy")
+    runtime = policy.runtime
+
+    # ------------------------------------------------- the engineering pack
+    gate.check(
+        "runtime dials are not policy",
+        bool(runtime) and "runtime.yaml" not in POLICY_FILES,
+        f"{len(POLICY_FILES)} packs decide what the detector says and are "
+        "digested into every lake; runtime.yaml decides what it costs, so "
+        "changing a budget does not invalidate 24m rows",
+    )
+    gate.check(
+        "the engine has a budget",
+        bool(policy.duckdb_memory_limit) and bool(policy.duckdb_temp_directory),
+        f"DuckDB held to {policy.duckdb_memory_limit}, spilling to "
+        f"{policy.duckdb_temp_directory} -- a join over 24m rows finishes slowly "
+        "rather than being killed",
+    )
+    gate.check(
+        "the batch has a budget",
+        policy.target_minutes == 15.0 and policy.peak_rss_budget_gb == 12.0,
+        f"{policy.target_minutes:.0f} minutes and "
+        f"{policy.peak_rss_budget_gb:.0f} GB, the figures docs/specs/detector.md "
+        "sets for this phase",
+    )
+    caps = {
+        "max_train_rows": int(policy.autoencoder["max_train_rows"]),
+        "model attributions": int(policy.autoencoder["attribution_max_rows"]),
+        "forest score batch": int(policy.isolation_forest["score_batch_rows"]),
+        "salary attributions": int(policy.expected_salary["attribution_max_rows"]),
+    }
+    gate.check(
+        "the caps do not bind at 10k",
+        min(caps.values()) >= 10_000,
+        ", ".join(f"{name} {value:,}" for name, value in sorted(caps.items()))
+        + " -- every one above the 10k population, so phases 3-6 still score "
+        "exactly what they scored",
+    )
+
+    # --------------------------------------------------------- the 1m lake
+    profiles = load_profiles(ROOT / "data" / "runs")
+    profile = profiles.get("1m") or {}
+    try:
+        cfg = DetectorConfig.build(
+            "1m",
+            run_id=profile.get("run_id") or None,
+            lake=ROOT / "data" / "raw",
+            features=ROOT / "data" / "features",
+            runs=ROOT / "data" / "runs",
+        )
+    except LakeError:
+        gate.check(
+            "the 1m lake exists", False,
+            "generate it first:  python tasks.py datagen --scale 1m --seed 42",
+        )
+        return gate.report()
+
+    counts = {k: int(v) for k, v in (cfg.manifest.get("row_counts") or {}).items()}
+    payroll = counts.get("fact_payroll_monthly", 0)
+    allowances = counts.get("fact_payroll_allowance", 0)
+    gate.check(
+        "the 1m lake is a million employees",
+        cfg.employees == 1_000_000 and cfg.periods == 24,
+        f"{cfg.employees:,} employees over {cfg.periods} months",
+    )
+    employee_months = cfg.employees * cfg.periods
+    gate.check(
+        "the lake scales with the population",
+        0.9 * employee_months <= payroll <= employee_months
+        and allowances > payroll * 5,
+        f"{payroll:,} payroll rows ({payroll / employee_months:.0%} of "
+        f"{employee_months:,} employee-months -- the rest are months before a "
+        f"hire) and {allowances:,} allowance rows",
+    )
+    injection = cfg.manifest.get("injection") or {}
+    by_code = {k: int(v) for k, v in (injection.get("by_code") or {}).items()}
+    confounders = sum(int(v) for v in (injection.get("confounders") or {}).values())
+    gate.check(
+        "ground truth scales too",
+        len(by_code) == 34 and sum(by_code.values()) > 30_000 and confounders > 8_000,
+        f"{sum(by_code.values()):,} anomalies across {len(by_code)}/34 codes, "
+        f"plus {confounders:,} planted look-alikes",
+    )
+    workspace = Path(
+        runtime_pack.section(runtime, "datagen", "injection").get("workspace")
+        or "data/_work"
+    )
+    leftover = sorted((ROOT / workspace).glob("*.duckdb")) if (
+        ROOT / workspace
+    ).exists() else []
+    gate.check(
+        "pass 2 leaves no working copy behind",
+        not leftover,
+        "injection reads the lake through a database file rather than 40 GB of "
+        "in-memory tables, and deletes it when it is done"
+        if not leftover else f"left behind: {[p.name for p in leftover]}",
+    )
+
+    # ------------------------------------------------------------- the run
+    gate.check(
+        "the 1m batch has been run",
+        bool(profile),
+        f"run {profile.get('run_id')}, {len(profile.get('stages') or {})} stages"
+        if profile
+        else "run it first:  python tasks.py detect --scale 1m",
+    )
+    if not profile:
+        return gate.report()
+
+    stages = {k: float(v) for k, v in (profile.get("stages") or {}).items()}
+    gate.check(
+        "the profile is of this lake",
+        profile.get("lake_generated_at") == cfg.manifest.get("generated_at")
+        and profile.get("policy_digest") == cfg.policy_digest,
+        "the run was measured against exactly this lake and this policy pack -- "
+        "a budget met under other conditions is not evidence about these",
+    )
+    needed = ("features", "l1", "l2", "l3", "fusion", "agg")
+    missing = [s for s in needed if s not in stages]
+    reused = [s for s in (profile.get("cached") or []) if s in needed]
+    gate.check(
+        "every stage is accounted for",
+        not missing,
+        f"{', '.join(needed)}; "
+        + (f"{', '.join(reused)} reused from a previous run at this scale, timed "
+           "at what it cost when it last really ran"
+           if reused else "all measured in one pass")
+        if not missing else f"never run: {missing}",
+    )
+    seconds = float(profile.get("stage_seconds_total") or profile.get("seconds") or 0)
+    budget_seconds = policy.target_minutes * 60
+    slowest = max(stages.items(), key=lambda kv: kv[1]) if stages else ("", 0.0)
+    gate.check(
+        "a full 1m run is under 15 minutes",
+        0 < seconds <= budget_seconds,
+        f"{seconds / 60:.1f} min of stage time against a budget of "
+        f"{policy.target_minutes:.0f}; the slowest stage is {slowest[0]} at "
+        f"{slowest[1] / 60:.1f} min",
+    )
+    peak = profile.get("peak_rss_gb")
+    gate.check(
+        "peak memory is under 12 GB",
+        bool(peak) and float(peak) <= policy.peak_rss_budget_gb,
+        f"{float(peak):.2f} GB peak resident set against a budget of "
+        f"{policy.peak_rss_budget_gb:.0f}, sampled while the batch ran"
+        if peak else "no peak was measured; psutil is not installed",
+    )
+    small = profiles.get("10k") or {}
+    small_stages = {k: float(v) for k, v in (small.get("stages") or {}).items()}
+    population_ratio = cfg.employees / max(int(small.get("employees") or 0), 1)
+    growth = {
+        stage: stages[stage] / small_stages[stage]
+        for stage in stages
+        if small_stages.get(stage, 0.0) >= 1.0
+    }
+    worst = max(growth.items(), key=lambda kv: kv[1]) if growth else ("", 0.0)
+    gate.check(
+        "no stage grows worse than the population",
+        bool(growth) and worst[1] <= population_ratio,
+        f"{len(growth)} stage(s) measured at both tiers; the worst is "
+        f"{worst[0]} at {worst[1]:.0f}x for {population_ratio:.0f}x the "
+        "employees -- every stage is linear or better",
+    )
+
+    # ----------------------------------------------------------- the queue
+    alerts_path = cfg.run_dir / ALERTS_FILE
+    if not alerts_path.exists():
+        gate.check("alerts written at 1m", False, f"no {alerts_path}")
+        return gate.report()
+    alerts = f"read_parquet('{str(alerts_path).replace(chr(92), '/')}')"
+    con = duckdb.connect()
+    try:
+        total, ids, live, codes, critical, high = con.execute(
+            f"SELECT count(*), count(DISTINCT alert_id), "
+            f"count(*) FILTER (WHERE NOT suppressed), "
+            f"count(DISTINCT anomaly_code), "
+            f"count(*) FILTER (WHERE severity = 'CRITICAL'), "
+            f"count(*) FILTER (WHERE severity = 'HIGH') FROM {alerts}"
+        ).fetchone()
+        want_critical = cfg.scaled(float(policy.alert_budget["critical"]))
+        want_high = cfg.scaled(float(policy.alert_budget["high"]))
+        tolerance = policy.budget_tolerance
+        gate.check(
+            "the queue is the budget at 1m",
+            abs(critical - want_critical) <= want_critical * tolerance
+            and abs(high - want_high) <= want_high * tolerance,
+            f"{critical:,} CRITICAL against {want_critical:,.0f} and {high:,} "
+            f"HIGH against {want_high:,.0f}, plus or minus "
+            f"{policy.alert_budget['tolerance_pct']}%",
+        )
+        gate.check(
+            "every code reaches the queue at 1m",
+            codes == 34,
+            f"{codes}/34 codes have at least one alert among {total:,}",
+        )
+        gate.check(
+            "an alert still keeps its identity",
+            ids == total,
+            f"{ids:,} distinct alert ids over {total:,} alerts -- an id is what "
+            "a case is filed under, so two cases may never share one",
+        )
+
+        bundles = _sample_bundles(alerts_path)
+        invalid = []
+        for bundle in bundles:
+            try:
+                validate(bundle)
+            except EvidenceError as exc:
+                invalid.append(str(exc)[:60])
+        gate.check(
+            "bundles still validate at 1m",
+            bundles and not invalid,
+            f"{len(bundles)} bundles sampled across the queue, every one against "
+            "evidence_v1.json" if not invalid else f"{invalid[:2]}",
+        )
+        jargon = sorted({
+            word
+            for bundle in bundles
+            for text in ([r["text"] for r in bundle["reasons"]]
+                         + bundle["recommended_actions"])
+            for word in _jargon(text)
+        })
+        gate.check(
+            "no ML jargon at 1m either",
+            not jargon,
+            f"{len(bundles)} sampled bundles against {len(ML_JARGON)} banned terms"
+            if not jargon else f"found={jargon}",
+        )
+
+        # ------------------------------------------------------- the map
+        agg_path = cfg.run_dir / AGG_FILE
+        if not agg_path.exists():
+            gate.check("the map aggregate is written", False, f"no {agg_path}")
+            return gate.report()
+        agg = f"read_parquet('{str(agg_path).replace(chr(92), '/')}')"
+        gate.check(
+            "the map aggregate is written",
+            _columns(agg_path) == set(AGG_SCHEMA),
+            f"{AGG_FILE}, {con.execute(f'SELECT count(*) FROM {agg}').fetchone()[0]:,}"
+            f" rows x {len(AGG_SCHEMA)} columns -- the map never aggregates on request",
+        )
+        periods, sites, totals, frames = con.execute(
+            f"SELECT count(DISTINCT period), count(DISTINCT site_id), "
+            f"count(*) FILTER (WHERE anomaly_code = '{TOTAL}'), "
+            f"count(DISTINCT (period, site_id)) FROM {agg}"
+        ).fetchone()
+        gate.check(
+            "one frame a month, one row a site",
+            periods == cfg.periods and totals == frames,
+            f"{periods} monthly frames over {sites} sites; {totals:,} site-month "
+            "totals for as many site-months, so a frame is a filter not a group-by",
+        )
+        mismatched = con.execute(
+            f"SELECT count(*) FROM (SELECT period, site_id, "
+            f"sum(alert_count) FILTER (WHERE anomaly_code <> '{TOTAL}') AS parts, "
+            f"max(alert_count) FILTER (WHERE anomaly_code = '{TOTAL}') AS whole "
+            f"FROM {agg} GROUP BY 1, 2 HAVING parts IS DISTINCT FROM whole)"
+        ).fetchone()[0]
+        gate.check(
+            "a total is the sum of its codes",
+            mismatched == 0,
+            "every site-month total equals the codes underneath it, so filtering "
+            "the map by code cannot show more than the map itself",
+        )
+        exposure, monthly = con.execute(
+            f"SELECT round(sum(financial_exposure_cumulative)), "
+            f"round(sum(financial_exposure_monthly)) FROM {agg} "
+            f"WHERE anomaly_code = '{TOTAL}'"
+        ).fetchone()
+        queue_exposure, queue_monthly = con.execute(
+            f"SELECT round(sum(financial_impact_cumulative)), "
+            f"round(sum(financial_impact_monthly)) FROM {alerts} WHERE NOT suppressed"
+        ).fetchone()
+        # Every row is rounded to the halala, so a queue spread over tens of
+        # thousands of site-months can differ from its own total by a fraction
+        # of a riyal per row. Anything larger is a finding counted twice or not
+        # at all, which is what this is here to catch.
+        rows = con.execute(f"SELECT count(*) FROM {agg}").fetchone()[0]
+        drift = max(abs(exposure - queue_exposure), abs(monthly - queue_monthly))
+        gate.check(
+            "exposure is conserved",
+            drift <= 0.01 * rows,
+            f"SAR {exposure:,.0f} across the frames against SAR "
+            f"{queue_exposure:,.0f} in the queue -- SAR {drift:,.0f} apart over "
+            f"{rows:,} rounded rows, so a year of frames adds up to the recovery "
+            "figure rather than a multiple of it",
+        )
+        bad_rate = con.execute(
+            f"SELECT count(*) FROM {agg} WHERE headcount <= 0 OR "
+            f"abs(alerts_per_1000 - alert_count * 1000.0 / headcount) > 0.001"
+        ).fetchone()[0]
+        gate.check(
+            "the map metric is a rate",
+            bad_rate == 0,
+            "every row carries its site's headcount that month and alerts per "
+            "1,000 against it -- a raw count would draw a population map",
+        )
+        undrawable = con.execute(
+            f"SELECT count(*) FROM {agg} WHERE latitude IS NULL OR longitude IS NULL "
+            f"OR latitude NOT BETWEEN {SAUDI_BBOX['lat'][0]} AND {SAUDI_BBOX['lat'][1]} "
+            f"OR longitude NOT BETWEEN {SAUDI_BBOX['lon'][0]} AND {SAUDI_BBOX['lon'][1]} "
+            f"OR region_code = ''"
+        ).fetchone()[0]
+        gate.check(
+            "every alerted site can be drawn",
+            undrawable == 0,
+            f"{sites} sites, each with coordinates inside the Kingdom and a region "
+            "to roll up into",
+        )
+        suppressed_on_map = con.execute(
+            f"SELECT coalesce(sum(alert_count), 0) FROM {agg} "
+            f"WHERE anomaly_code = '{TOTAL}'"
+        ).fetchone()[0]
+        # Clamped to the run's window, exactly as the aggregate clamps it: a
+        # finding dated from before the first month the lake carries is drawn
+        # from that first month, because there is no earlier frame to draw it in.
+        alert_months = con.execute(
+            f"SELECT coalesce(sum("
+            f"  ((least(period_to, {cfg.period_to}) // 100) * 12 "
+            f"   + (least(period_to, {cfg.period_to}) % 100)) "
+            f"  - ((greatest(period_from, {cfg.period_from}) // 100) * 12 "
+            f"     + (greatest(period_from, {cfg.period_from}) % 100)) + 1), 0) "
+            f"FROM {alerts} WHERE NOT suppressed"
+        ).fetchone()[0]
+        gate.check(
+            "the map counts the queue and nothing else",
+            suppressed_on_map == alert_months,
+            f"{suppressed_on_map:,} site-months of alert equal the {alert_months:,} "
+            f"months the {live:,} live alerts cover; {total - live} suppressed "
+            "alert(s) are on nobody's map",
+        )
+        worst_frame = con.execute(
+            f"SELECT max(rows) FROM (SELECT period, count(*) AS rows FROM {agg} "
+            f"WHERE anomaly_code = '{TOTAL}' GROUP BY 1)"
+        ).fetchone()[0]
+        gate.check(
+            "a frame is a small payload",
+            worst_frame <= 200,
+            f"the busiest month is {worst_frame} site rows, not {live:,} alerts -- "
+            "which is what makes a 24-frame animation smooth",
+        )
+    finally:
+        con.close()
+
+    gate.check(
+        "the aggregate is cheap",
+        stages.get("agg", 0.0) <= 60.0,
+        f"{stages.get('agg', 0.0):.1f}s to aggregate {live:,} alerts into "
+        f"{periods} frames",
+    )
+    written = (ROOT / "docs" / "EVAL_REPORT.md")
+    text = written.read_text(encoding="utf-8") if written.exists() else ""
+    gate.check(
+        "the report profiles every tier",
+        "By scale tier" in text and "| `1m` |" in text,
+        "docs/EVAL_REPORT.md section 5 now carries one row per scale tier that "
+        "has been run, with its peak memory",
+    )
+    return gate.report()
+
+
 def _band_rank(band: str) -> int:
     """Worst last, so `>` means `more severe than`."""
     order = ("WATCHLIST", "MEDIUM", "HIGH", "CRITICAL")
@@ -1584,6 +1997,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return verify_5()
     if phase == 6:
         return verify_6()
+    if phase == 7:
+        return verify_7()
     if phase in PHASE_TITLES:
         return verify_pending(phase)
     print(f"error: no such phase: {phase} (valid: 0-14)", file=sys.stderr)

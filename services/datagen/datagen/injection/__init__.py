@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import duckdb
+
+from policycore import runtime as policy_runtime
 
 from ..config import ScaleConfig
 from ..policy import DatagenPolicy
@@ -54,6 +57,9 @@ STAGES = (
 # Tables that exist before pass 2 runs; the label tables are its output.
 DATA_TABLES = tuple(t for t in SCHEMAS if not t.startswith("labels_"))
 
+# Where the working copy lives when `policy/runtime.yaml` says nothing.
+DEFAULT_WORKSPACE = "data/_work"
+
 
 @dataclass
 class InjectionResult:
@@ -74,15 +80,40 @@ class InjectionResult:
         }
 
 
-def connect(cfg: ScaleConfig) -> duckdb.DuckDBPyConnection:
+def workspace(cfg: ScaleConfig, runtime: dict | None = None) -> Path:
+    """Where pass 2 keeps its working copy of the lake. Removed when it ends."""
+    settings = policy_runtime.section(runtime or {}, "datagen", "injection")
+    root = Path(settings.get("workspace") or DEFAULT_WORKSPACE)
+    return root / f"injection-{cfg.scale}.duckdb"
+
+
+def connect(
+    cfg: ScaleConfig, runtime: dict | None = None
+) -> duckdb.DuckDBPyConnection:
     """A read copy of the clean lake -- the label tables do not exist yet.
 
     Materialised into tables with an index on `employee_id` rather than left as
     views over Parquet: every injector filters these by employee a few hundred
     times over, and against a view each of those is a fresh scan of the whole
     file. At 10k that is the difference between two minutes and ten seconds.
+
+    **The copy is a database file, not an in-memory one** (phase 7). At 1m the
+    lake is 140 million allowance rows and 24 million payroll rows; held in
+    memory those tables are tens of gigabytes, and the machine that generates
+    the dataset is the same 16 GB machine that has to score it. On disk, with
+    the buffer budget from `policy/runtime.yaml`, the engine pages in what an
+    injector asks for and pass 2 costs what its working set costs rather than
+    what the whole lake weighs. The file is deleted when pass 2 finishes.
     """
-    con = duckdb.connect()
+    settings = policy_runtime.section(runtime or {}, "datagen", "injection")
+    path = workspace(cfg, runtime)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():  # a previous run that died before its cleanup
+        path.unlink()
+    con = duckdb.connect(str(path))
+    limit = settings.get("memory_limit_gb")
+    if limit:
+        con.execute(f"SET memory_limit = '{float(limit):.1f}GB'")
     for table in DATA_TABLES:
         glob = str(cfg.table_dir(table) / "**" / "*.parquet").replace("\\", "/")
         con.execute(
@@ -97,15 +128,21 @@ def connect(cfg: ScaleConfig) -> duckdb.DuckDBPyConnection:
 def inject(cfg: ScaleConfig, policy: DatagenPolicy, streams) -> InjectionResult:
     """Run every injector, plant every confounder, and rewrite the lake."""
     started = time.perf_counter()
-    con = connect(cfg)
+    runtime = policy_runtime.load(policy.pack.root)
+    con = connect(cfg, runtime)
     try:
         ctx = Context(cfg, policy, con, streams)
         for stage in STAGES:
             for injector in stage:
                 injector(ctx)
+                # Between injectors, not inside one: an injector holds its own
+                # candidates until it has finished with them, and what it did
+                # not edit is worth nothing to the next one (phase 7).
+                ctx.release()
         _refresh_allowance_columns(ctx)
     finally:
         con.close()
+        _discard_workspace(cfg, runtime)
 
     counts = apply_edits(cfg, ctx.edits)
     counts["labels_anomaly"] = _write_labels(cfg, ctx)
@@ -124,6 +161,14 @@ def inject(cfg: ScaleConfig, policy: DatagenPolicy, streams) -> InjectionResult:
         row_counts=counts,
         seconds=time.perf_counter() - started,
     )
+
+
+def _discard_workspace(cfg: ScaleConfig, runtime: dict | None = None) -> None:
+    """Delete the working copy. It is a cache of the lake, never an output."""
+    path = workspace(cfg, runtime)
+    for candidate in (path, path.with_suffix(path.suffix + ".wal")):
+        if candidate.exists():
+            candidate.unlink()
 
 
 def _refresh_allowance_columns(ctx: Context) -> None:
@@ -193,4 +238,4 @@ def _write_confounders(cfg: ScaleConfig, ctx: Context) -> int:
     return arrow.num_rows
 
 
-__all__ = ["InjectionResult", "connect", "inject"]
+__all__ = ["InjectionResult", "connect", "inject", "workspace"]

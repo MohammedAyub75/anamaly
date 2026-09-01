@@ -6,7 +6,7 @@ bundle, it must not appear on screen and the LLM must not say it.
 
 The bundle is produced by layer 4 (`services/detector`, phase 6), persisted as JSONB in Postgres
 alongside the alert row, and returned verbatim by `GET /alerts/{id}`. Between the detector and
-Postgres it travels in the `evidence_json` column of `data/runs/run_id=<id>/alerts.parquet`, one row
+Postgres it travels in the `evidence_json` column of `data/runs/scale=<n>/run_id=<id>/alerts.parquet`, one row
 per alert: phase 8 upserts the queue and its bundles in one pass, and thirty-five thousand small
 JSON files at 1m scale would be a directory nobody can copy.
 

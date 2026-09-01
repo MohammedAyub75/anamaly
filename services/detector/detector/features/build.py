@@ -12,6 +12,7 @@ Targets: under 60 seconds at 10k, under 10 minutes at 1m x 24 on 24 cores.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -25,6 +26,21 @@ from ..lake import connect
 from ..policy import AMOUNT_TOLERANCE_SAR, DetectorPolicy
 
 SQL_DIR = Path(__file__).parent / "sql"
+
+# Intermediates at employee x period grain, written to Parquet as they are
+# computed and read back as views rather than held as temp tables (phase 7).
+# The value is the feature table the intermediate *is*, or None for one that is
+# internal to the build.
+STREAMED: dict[str, str | None] = {
+    "asat": None,
+    "allowance_features": "features_allowance",
+    "allowance_pivot": None,
+    "period_features": "features_period",
+}
+
+# Where the internal ones live while the build runs. Removed at the end: it is
+# a spill, not an output.
+SCRATCH = "_intermediate"
 
 # Written to data/features/scale=<n>/. `period`-partitioned where the table is
 # per-month; single-part where it is per-employee.
@@ -114,9 +130,33 @@ GROUP BY 1, 2, 3, 4, 5, 6, 8, 9"""
     return "\nUNION ALL\n".join(blocks)
 
 
-def substitutions(policy: DetectorPolicy) -> dict[str, str]:
+def windows(cfg: DetectorConfig, rows_per_write: int) -> list[list[int]]:
+    """The window split into groups of months, each about `rows_per_write` rows.
+
+    One group at 10k and 100k -- the whole window, one statement, exactly what
+    phases 3 to 6 measured -- and twelve groups of two months at 1m, where a
+    single statement cannot hold the result. The size is in *rows* rather than
+    months so the same dial means the same thing at every tier.
+    """
+    per_month = max(cfg.employees, 1)
+    months = max(1, int(rows_per_write) // per_month)
+    periods = cfg.period_list
+    return [periods[i : i + months] for i in range(0, len(periods), months)]
+
+
+def substitutions(
+    policy: DetectorPolicy, periods: list[int] | None = None
+) -> dict[str, str]:
     """Every `$placeholder` the SQL blocks expect, resolved from the policy pack."""
     return {
+        # Empty for a whole-window build; one month when the build is writing a
+        # month at a time. Every period-grained input carries it, so a monthly
+        # write reads one partition of each rather than all twenty-four.
+        "period_filter": (
+            ""
+            if not periods
+            else "AND period IN (" + ", ".join(str(int(p)) for p in periods) + ")"
+        ),
         "expected_case": policy.expected_amount_case(),
         "tolerance": f"{AMOUNT_TOLERANCE_SAR:.2f}",
         "pivot_columns": _pivot_columns(policy),
@@ -130,10 +170,12 @@ def substitutions(policy: DetectorPolicy) -> dict[str, str]:
     }
 
 
-def render(block: str, policy: DetectorPolicy) -> str:
+def render(
+    block: str, policy: DetectorPolicy, periods: list[int] | None = None
+) -> str:
     """One SQL block with its policy-derived fragments substituted in."""
     text = (SQL_DIR / block).read_text(encoding="utf-8")
-    rendered = Template(text).safe_substitute(substitutions(policy))
+    rendered = Template(text).safe_substitute(substitutions(policy, periods))
     if "$" in rendered.replace("$$", ""):
         leftover = [line for line in rendered.splitlines() if "$" in line]
         raise ValueError(f"{block}: unresolved placeholder in {leftover[:3]}")
@@ -181,6 +223,104 @@ def is_current(cfg: DetectorConfig, policy: DetectorPolicy) -> bool:
 # --------------------------------------------------------------------------
 # Build
 # --------------------------------------------------------------------------
+
+
+def statements(sql: str) -> list[str]:
+    """One rendered block split into its statements.
+
+    Boundaries are semicolons in *code*, not in comments: the blocks explain
+    themselves at length, and "a rule predicate is a statement of policy;
+    arithmetic inside one is a feature that was not built" is a sentence, not
+    two statements.
+    """
+    out: list[str] = []
+    current: list[str] = []
+    for line in sql.splitlines():
+        code = line.split("--", 1)[0]
+        if ";" in code:
+            cut = line.rindex(";", 0, len(code)) + 1
+            current.append(line[:cut])
+            out.append("\n".join(current))
+            current = [line[cut:]] if line[cut:].strip() else []
+        else:
+            current.append(line)
+    if any(part.strip() for part in current):
+        out.append("\n".join(current))
+    return [part.strip() for part in out if part.strip()]
+
+
+def split_create(statement: str) -> tuple[str | None, str]:
+    """`CREATE OR REPLACE TEMP TABLE x AS <query>` to `("x", "<query>")`."""
+    match = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+TEMP\s+TABLE\s+(\w+)\s+AS\s",
+        statement,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None, statement
+    return match.group(1), statement[match.end():].strip().rstrip(";")
+
+
+def _query_of(sql: str, name: str) -> str:
+    """The query behind one `CREATE OR REPLACE TEMP TABLE <name> AS` statement."""
+    for statement in statements(sql):
+        found, query = split_create(statement)
+        if found == name:
+            return query
+    raise KeyError(f"no statement creating {name!r} in this block")
+
+
+def stream(
+    con: duckdb.DuckDBPyConnection,
+    cfg: DetectorConfig,
+    policy: DetectorPolicy,
+    block: str,
+    name: str,
+) -> None:
+    """Materialise one employee x period intermediate to Parquet, not to memory.
+
+    At 1m these are twenty-four million rows and up to a hundred and sixty-five
+    columns; DuckDB cannot pin that many blocks and the build dies with an
+    out-of-memory error even though every join in it is streamable.  Written
+    straight out of the query pipeline and read back as a view, the peak is the
+    pipeline rather than the result, and every later block reads only the
+    columns it asks for instead of scanning a wide table in RAM.
+
+    Two of the four are the feature tables themselves, so this *is* their write
+    -- there is no second copy. The other two are internal, and go to a scratch
+    directory the build removes when it finishes.
+    """
+    output = STREAMED[name]
+    target = cfg.feature_dir(output) if output else cfg.features / SCRATCH / name
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    path = str(target).replace("\\", "/")
+    # A few months per statement rather than the whole window. The partitioned
+    # writer keeps a buffer per thread per partition -- on a 32-thread machine,
+    # twenty-four months of a 165-column table is 768 open buffers, and at 1m
+    # it runs out of memory before it writes anything. Two months at a time it
+    # holds 64, and the filter prunes every input to those months' partitions.
+    # At 10k and 100k the whole window is one group, so this is one statement
+    # and exactly the plan phases 3 to 6 ran.
+    groups = windows(cfg, policy.rows_per_write)
+    for group in groups:
+        query = _query_of(render(block, policy, group), name)
+        # `APPEND` because each group writes different months into the same
+        # directory, and DuckDB then insists the file name be unique per write.
+        # A single-group build keeps the numbered names phases 3 to 6 wrote.
+        pattern = "part-{uuid}" if len(groups) > 1 else "part-{i}"
+        con.execute(
+            f"COPY (SELECT *, period AS period_part FROM ({query})) TO '{path}' "
+            f"(FORMAT PARQUET, PARTITION_BY (period_part), "
+            + ("APPEND, " if len(groups) > 1 else "")
+            + f"ROW_GROUP_SIZE {ROW_GROUP_ROWS}, "
+            + f"FILENAME_PATTERN '{pattern}')"
+        )
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {name} AS SELECT * FROM "
+        f"read_parquet('{path}/**/*.parquet', hive_partitioning=false)"
+    )
 
 
 def _write(
@@ -234,17 +374,29 @@ def build(
 
     started = time.perf_counter()
     result = FeatureBuild(seconds=0.0, cache_key=key)
-    con = connect(cfg, threads=threads)
+    con = connect(cfg, threads=threads, policy=policy)
+    # Nothing downstream reads the feature store in file order -- every layer
+    # orders what it needs explicitly, and the evidence fingerprint sorts its
+    # findings before hashing them. Letting DuckDB write 24m rows in whatever
+    # order the threads finish saves a quarter of the write time and a copy of
+    # the table (phase 7).
+    con.execute("SET preserve_insertion_order = false")
     try:
         for block in BLOCKS:
             block_started = time.perf_counter()
-            con.execute(render(block, policy))
+            for statement in statements(render(block, policy)):
+                name, _query = split_create(statement)
+                if name in STREAMED:
+                    stream(con, cfg, policy, block, name)
+                else:
+                    con.execute(statement)
             elapsed = time.perf_counter() - block_started
             result.block_seconds[block] = round(elapsed, 3)
             if log:
                 log(f"  {block:<24} {elapsed:6.2f}s")
         for name, source in OUTPUTS:
-            _write(con, cfg, name, source)
+            if STREAMED.get(source) != name:
+                _write(con, cfg, name, source)
             row = con.execute(f"SELECT count(*) FROM {source}").fetchone()
             result.row_counts[name] = int(row[0]) if row else 0
             result.columns[name] = len(
@@ -252,6 +404,9 @@ def build(
             )
     finally:
         con.close()
+        scratch = cfg.features / SCRATCH
+        if scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
 
     result.seconds = round(time.perf_counter() - started, 3)
     cfg.features_manifest.parent.mkdir(parents=True, exist_ok=True)

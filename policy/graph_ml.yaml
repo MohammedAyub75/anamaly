@@ -82,6 +82,10 @@ isolation_forest:
   max_features: 1.0
   random_state: 42
   n_jobs: -1
+  # Fitting is bounded by max_samples whatever the population; scoring is not
+  # — every employee walks all 300 trees. Scored a block at a time so the peak
+  # is one block's traversal rather than a million rows' worth (phase 7).
+  score_batch_rows: 200000
 
 # ---------------------------------------------------------------------------
 # Tabular denoising autoencoder (PyTorch). Categorical embeddings plus a
@@ -110,7 +114,18 @@ autoencoder:
   # Two runs over one lake must produce the same score, or the same alert
   # changes wording between runs.
   deterministic: true
+  # How many records the network is *fitted* on. Every employee is still
+  # scored; a sample this size describes the shape of a normal record as well
+  # as a million rows does, and at 1m the difference is 37 optimiser steps an
+  # epoch against 245 (phase 7). Seeded and sorted, so the sample is the same
+  # on every run. Above the population at 10k and 100k, where it does not bind.
+  max_train_rows: 150000
   attribution_top_n: 5
+  # How many records carry a per-feature explanation, taken from the top of
+  # the population by score. An explanation is built one record at a time in
+  # Python and is only ever read for records fusion actually surfaces, so
+  # below this the column is empty. Above the population at 10k and 100k.
+  attribution_max_rows: 25000
   # A feature contributing less than this share of the gap is noise on a
   # payslip and is folded into everything else rather than shown.
   attribution_min_share: 0.03

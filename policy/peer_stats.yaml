@@ -78,6 +78,11 @@ expected_salary:
   # are folded into "everything else" rather than shown.
   attribution_min_sar: 100
   attribution_top_n: 5
+  # How many records carry a per-driver attribution, taken by the widest
+  # residual. TreeSHAP over a million records costs minutes and is read for a
+  # few hundred: a record whose pay the model can account for has no gap to
+  # explain (phase 7). Above the population at 10k, where it does not bind.
+  attribution_max_rows: 50000
   # The residual is corroboration, not the trigger: a finding says "unexplained"
   # only when the model cannot account for this much of the gap.
   residual_min_sar: 1000

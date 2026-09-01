@@ -20,7 +20,15 @@ from .features.build import build as build_features
 from .lake import connect
 from .layers.l1_rules import RuleError, RuleSet, run_rules
 from .policy import DetectorPolicy, DigestMismatch
-from .run import STAGES, RunResult, StageNotBuilt, rule_digest
+from .run import (
+    STAGES,
+    PeakMemory,
+    RunResult,
+    StageNotBuilt,
+    load_profiles,
+    record_profile,
+    rule_digest,
+)
 from .run import run as run_batch
 
 
@@ -44,11 +52,20 @@ def cmd_build_features(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg, policy, ruleset = _context(args)
-    result = run_batch(
-        cfg, policy, ruleset, stages=args.stages, force=args.force,
-        threads=args.threads, log=print,
-    )
+    # Measured around the whole batch, because the budget in
+    # `policy/runtime.yaml` is a statement about the machine the run needs and
+    # the peak can fall in any stage -- at 1m it is the models' matrix, at 10k
+    # it is nothing at all.
+    with PeakMemory(policy.sample_interval_seconds) as peak:
+        result = run_batch(
+            cfg, policy, ruleset, stages=args.stages, force=args.force,
+            threads=args.threads, log=print,
+        )
+    record_profile(cfg, result, peak_rss_gb=peak.peak_gb)
     print(f"\nrun {result.run_id} complete in {result.seconds:.2f}s")
+    if peak.peak_gb:
+        print(f"  peak RSS {peak.peak_gb:.2f} GB against a budget of "
+              f"{policy.peak_rss_budget_gb:.0f} GB")
     for path in (result.hits_path, result.l2_hits_path, result.l3_hits_path):
         if path:
             print(f"  findings -> {path}")
@@ -56,6 +73,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"  scores   -> {result.l3_scores_path}")
     if result.alerts_path:
         print(f"  alerts   -> {result.alerts_path}")
+    if result.agg_path:
+        print(f"  map      -> {result.agg_path}")
     return 0
 
 
@@ -128,6 +147,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         cfg, ruleset, result.l1, result.l2, result.l3, result.l4,
         planned=report.PLANNED,
         runtime=result.runtime,
+        profiles=load_profiles(cfg.runs_root),
         policy_digest=policy.digest,
         rule_digest=rule_digest(ruleset),
     )

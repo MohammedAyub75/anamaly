@@ -1,0 +1,74 @@
+# Runtime dials -- how big a machine the batch is allowed to use, and how much
+# work each stage may do per row.  Phase 7 (scale-up to 1M).
+#
+# Deliberately NOT one of the nine packs in `policycore.packs.POLICY_FILES`, so
+# it is NOT part of `policy_digest` and editing it does not invalidate a lake.
+# The rule that decides membership is simple: a digested pack changes what the
+# detector *says*, this file only changes what it *costs*.  Lowering a memory
+# limit or raising a thread count must never mean regenerating 24 million
+# payroll rows, and a figure that moved because somebody tuned a batch size
+# would be a bug in this file rather than a legitimate re-score.
+#
+# Anything that does change an answer -- how many rows a model trains on, how
+# many records carry an attribution -- lives in `graph_ml.yaml` and
+# `peer_stats.yaml` with the rest of the model configuration, and is covered by
+# the stage digests there.
+
+version: 1
+
+# The engine every bulk query runs in.  The budget is DuckDB's own, inside the
+# process budget below: the models, the matrix and the bundles need the rest.
+duckdb:
+  # Inside the 12 GB the whole batch is held to. The feature build is the one
+  # stage that wants all of it -- the wide employee x period table is tens of
+  # gigabytes at 1m and the engine spills the rest -- and it is also the stage
+  # where nothing else is loaded, so this is the process's own peak.
+  memory_limit_gb: 8.0
+  # null = every core the machine has. The 1m target assumes ~24.
+  threads: null
+  # Where DuckDB spills when a hash join outgrows its budget. Spilling slowly
+  # is the correct answer at 1m; being killed by the OS is not.
+  temp_directory: data/runs/_spill
+
+# The generator's pass 2. Injection reads the clean lake back through DuckDB,
+# and at 1m that is 140 million allowance rows: held as in-memory tables they
+# are forty gigabytes, so the working copy is a database file with a buffer
+# budget instead, and the engine pages what it needs (phase 7).
+datagen:
+  injection:
+    memory_limit_gb: 4.0
+    # Removed when pass 2 finishes. Beside the lake rather than in it: the lake
+    # directory holds Parquet and a manifest, and nothing else.
+    workspace: data/_work
+
+# What the phase-7 gate holds a full run to (docs/specs/detector.md phase map).
+batch:
+  target_minutes: 15.0
+  peak_rss_gb: 12.0
+  # Peak RSS is sampled this often while the batch runs. Fine enough to catch
+  # a model fit, coarse enough not to perturb the thing it measures.
+  sample_interval_seconds: 0.25
+
+# The feature build writes the two period-grained tables a few months at a
+# time rather than in one statement: DuckDB's partitioned writer keeps a buffer
+# per thread per month, and at 1m twenty-four months of a 165-column table runs
+# the engine out of memory before it writes anything. Measured in rows so the
+# dial means the same thing at every tier -- one statement at 10k and 100k,
+# twelve at 1m.
+features:
+  rows_per_write: 2000000
+
+# Layer 4 assembles one bundle per alert in Python, each carrying a 24-month
+# timeline.  At 1m that is tens of thousands of them, so the employee display
+# rows and the timelines are fetched a chunk of alerts at a time rather than
+# for the whole queue at once -- the peak is then the chunk, not the run.
+fusion:
+  bundle_chunk_alerts: 4000
+
+# `agg_alerts_by_site_month`: the pre-aggregated map payload, written by the
+# batch and never computed on request (docs/API_CONTRACT.md, /analytics/geo).
+aggregate:
+  enabled: true
+  # How many anomaly codes each site-month row names as its worst. The map's
+  # tooltip shows three; storing more would be dead weight in every frame.
+  top_codes: 3

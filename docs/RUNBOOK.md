@@ -41,6 +41,12 @@ Output lands in `data/raw/scale=<n>/` with a `manifest.json`. **Never open these
 inspect with a query and read the printed summary (`CLAUDE.md`). Reading one Parquet preview into a
 session costs more than an entire phase.
 
+Pass 2 (injection) keeps a working copy of the lake as a DuckDB database file under `data/_work/`
+and deletes it when it finishes; its buffer budget is `datagen.injection.memory_limit_gb` in
+`policy/runtime.yaml`. At 1m that file is around 10 GB, so the generation needs the disk for it as
+well as for the lake. A stray `data/_work/injection-*.duckdb` means a run died before its cleanup;
+it is a cache of the lake and is always safe to delete.
+
 ## Run a detection batch — phase 3+
 
 ```bash
@@ -48,7 +54,16 @@ python tasks.py detect --scale 10k --run-id 2026-08
 ```
 
 Stages run in order and each is independently cached and re-runnable: features → L1 rules → L2 peer
-stats → L3 ML/graph → L4 fusion → Postgres upsert. A fusion-weight change re-runs L4 only.
+stats → L3 ML/graph → L4 fusion → `agg` map frames → Postgres upsert. A fusion-weight change re-runs
+L4 and the aggregate, and nothing else.
+
+Outputs land in `data/runs/scale=<n>/run_id=<id>/`, partitioned by scale like the lake: the default
+run id is the last period of the window and is the same string at every tier.
+
+The run prints its peak resident set against the budget in `policy/runtime.yaml`, and records the
+per-stage timings under its scale tier in `data/runs/runtime_profile.json`. That file is what
+`docs/EVAL_REPORT.md` section 5 and the phase-7 gate read; a tier appears in it once it has been
+run.
 
 ## Evaluate — phase 3+
 

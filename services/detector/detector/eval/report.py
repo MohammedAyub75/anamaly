@@ -369,6 +369,44 @@ def render(report: EvalReport) -> str:
         "shown is what the stage took when it last actually ran."
     )
     add("")
+    if report.profiles:
+        add("### By scale tier")
+        add("")
+        add(
+            "Every tier that has been run, from `data/runs/runtime_profile.json`. "
+            "A tier appears once it has actually been run at that size. Each "
+            "stage carries the time it took when it last really ran, so the "
+            "total is the cost of a cold run whether or not the run that "
+            "recorded it reused the feature store; `peak RSS` is the whole "
+            "process, sampled while the batch ran, and is the high-water mark "
+            "for this lake."
+        )
+        add("")
+        tiers = sorted(
+            report.profiles.values(), key=lambda p: int(p.get("employees") or 0)
+        )
+        stages = []
+        for profile in tiers:
+            for stage in profile.get("stages") or {}:
+                if stage not in stages:
+                    stages.append(stage)
+        add("| Tier | Employees | " + " | ".join(stages) + " | Total | Peak RSS |")
+        add("|---|---:|" + "---:|" * (len(stages) + 2))
+        for profile in tiers:
+            timings = profile.get("stages") or {}
+            cells = [
+                f"{timings[stage]:.1f}" if stage in timings else "—"
+                for stage in stages
+            ]
+            peak = profile.get("peak_rss_gb")
+            add(
+                f"| `{profile.get('scale', '?')}` "
+                f"| {int(profile.get('employees') or 0):,} | "
+                + " | ".join(cells)
+                + f" | {float(profile.get('stage_seconds_total') or profile.get('seconds') or 0):.1f} "
+                + (f"| {peak:.2f} GB |" if peak else "| not measured |")
+            )
+        add("")
     add("## 6. Policy digest")
     add("")
     add(

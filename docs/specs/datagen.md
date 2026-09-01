@@ -105,6 +105,29 @@ with a different seed.
 - Parquet: ZSTD level 3, 100k row-groups, `use_pyarrow=True`. Facts partition by `period`.
 - Target: 1m scale in **under 10 minutes, peak RAM under 12 GB**.
 
+**What phase 7 measured** (32 threads, 16 GB, NVMe): 10k in **47s**, 100k in **425s**, 1m in
+**7,076s — 1 hour 58 minutes — at a peak of 9.2 GB**. The memory half of the target holds with room
+to spare; the time half does not, and is missed by an order of magnitude. Two things are
+responsible and neither is an accident of tuning:
+
+- **Pass 1 simulates a career per employee in Python.** The chunk loop is bounded and the writes are
+  streamed, so memory is flat across chunks, but the cost per employee is a fixed ~2.8 ms of Python
+  and it is paid a million times (48 minutes). Getting this to minutes means generating careers as
+  vectorised columns rather than per-employee records — a rewrite of `facts/employee.py` and
+  `facts/payroll.py` that would change the order every stream is drawn in, and therefore change the
+  dataset. It is not a tuning exercise; it is a new generator.
+- **Pass 2 loads, mutates and rewrites rows per victim** (70 minutes at 1m against 142s at 100k —
+  it grows faster than the population because the candidate queries scan a lake that is ten times
+  bigger *and* there are ten times as many victims). Phase 7 cut its memory from an
+  extrapolated ~45 GB to 9.2 GB by reading the lake through a database file with a buffer budget and
+  releasing the working copies of employees no injector edited, but the work itself is still one
+  Python pass per anomaly.
+
+The generator is a **build-time tool, not a request path**: a 1m lake is generated once and scored
+many times, so the honest engineering answer is that the two-hour generation is affordable and the
+fifteen-minute *detection* budget is the one that matters. Treat the ten-minute figure as an
+aspiration for a future vectorised generator, not as a gate; nothing in the build blocks on it.
+
 ## Module layout
 
 ```

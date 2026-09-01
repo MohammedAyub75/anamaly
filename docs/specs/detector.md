@@ -160,7 +160,7 @@ legitimate case is positively established.
   `docs/EVIDENCE_CONTRACT.md`. A rule declares `estimated` where the money it names is a
   reconstruction rather than a line in the payroll run; D04 is the only one that does today.
 
-Output goes to `data/runs/run_id=<id>/l1_hits.parquet` — employee, code, severity, window, rendered
+Output goes to `data/runs/scale=<n>/run_id=<id>/l1_hits.parquet` — employee, code, severity, window, rendered
 description, recommended actions, evidence JSON and both financial-impact figures. That file is the
 input phase 6 fuses and scores.
 
@@ -200,7 +200,7 @@ there and never restated, because two copies of one threshold is how an injector
 drift apart.
 
 Layer 2's findings carry **the same shape as layer 1's**, written to
-`data/runs/run_id=<id>/l2_hits.parquet`, so phase 6 fuses one list rather than two. The
+`data/runs/scale=<n>/run_id=<id>/l2_hits.parquet`, so phase 6 fuses one list rather than two. The
 `evidence_json` of a layer-2 finding is richer than a rule's flat map: `fields`, plus a
 `peer_context` block and a `feature_attributions` array in the shape
 `docs/EVIDENCE_CONTRACT.md` defines.
@@ -275,10 +275,10 @@ configured in **`policy/graph_ml.yaml`**, a new pack on the same principle `peer
 the computation is Python because a connected component, a Jaro-Winkler comparison and a
 reconstruction gap are not SQL predicates, and only the dials, the severities and the wording live
 in YAML. Findings carry **the same seventeen columns as layer 1's and layer 2's**, written to
-`data/runs/run_id=<id>/l3_hits.parquet`, so phase 6 fuses one list rather than three.
+`data/runs/scale=<n>/run_id=<id>/l3_hits.parquet`, so phase 6 fuses one list rather than three.
 
 **The two models produce no anomaly code.** They score every employee, and the score is written
-separately to `data/runs/run_id=<id>/l3_scores.parquet` — `forest_score`,
+separately to `data/runs/scale=<n>/run_id=<id>/l3_scores.parquet` — `forest_score`,
 `reconstruction_score`, `ml_score` and a per-feature attribution — because phase 6 weights layer 3
 as one contributor over the whole population while the findings above are about a handful of
 employees. `ml_score` is the **mean** of the two percentile ranks, not the max: two models agreeing
@@ -352,7 +352,7 @@ already built.
    `estimated`.
 7. Apply suppression: employee + code + evidence fingerprint matching a prior dismissal is
    suppressed and surfaced under a separate filter, not deleted.
-8. Write `data/runs/run_id=…/alerts.parquet`, the bundle travelling in the row's `evidence_json`
+8. Write `data/runs/scale=<n>/run_id=…/alerts.parquet`, the bundle travelling in the row's `evidence_json`
    rather than as one JSON file per alert, then upsert into Postgres and compute
    `agg_alerts_by_site_month` (phase 7).
 
@@ -423,6 +423,130 @@ Two divergences from `policy/fusion.yaml` as it was first written, both document
 **Runtime at 10k**: fusion in ~1.2s for 344 alerts — the scoring is arithmetic over a few hundred
 rows, and the two DuckDB queries that denormalise employee display and the 24-month timeline are
 the only work that grows with the population.
+
+## Scale-up to 1M (phase 7)
+
+Nothing in layers 1–4 changed its mind at a million employees; what changed is what the run is
+allowed to spend. Phase 7 is therefore mostly about three questions — what may be held in memory,
+what may be done per row in Python, and what has to be written once so the UI never computes it —
+plus the pre-aggregated table the map is served from.
+
+### `policy/runtime.yaml`, and why it is not a policy pack
+
+The engineering dials live in a tenth YAML file that is deliberately **outside**
+`policycore.packs.POLICY_FILES`, so it is not part of `policy_digest` and not recorded in a lake's
+`manifest.json`. The rule that decides membership: a digested pack changes what the system *says*,
+this file changes only what it *costs*. Lowering a memory limit must not mean regenerating
+twenty-four million payroll rows. Anything that does move a figure — how many rows a model is
+fitted on, how many records carry an attribution — stays in `graph_ml.yaml` and `peer_stats.yaml`
+with the rest of the model configuration, where the stage digests already cover it.
+
+It is read by `policycore.runtime.load()` because both services spend the same machine: the
+generator's pass 2 and the detector's feature build are the two places a 1m run runs out of memory.
+
+### What made the run affordable
+
+**Every stage got a budget instead of the machine.** `lake.connect()` takes the policy pack and sets
+DuckDB's `memory_limit` and a `temp_directory`, so a join over 24M rows spills and finishes rather
+than being killed by the OS.
+
+**The feature store is written out of the query pipeline, not out of memory.** The four
+employee × period intermediates — the as-at spine, the long allowance table, the allowance pivot and
+the wide rule-input table — used to be DuckDB temp tables. At 1m the wide one alone is 24 million
+rows and 168 columns, and the build died with an out-of-memory error before writing anything, even
+though every join in it streams. Each is now written straight to Parquet and read back as a view:
+the peak is the pipeline rather than the result, later blocks read only the columns they ask for,
+and two of the four *are* the feature tables, so there is no second copy. Two of them are internal
+and go to a scratch directory the build removes when it finishes.
+
+**And it is written a few months at a time.** DuckDB's partitioned writer keeps a buffer per thread
+per partition: twenty-four months of a 168-column table on a 32-thread machine is 768 open buffers,
+which is its own out-of-memory error. `features.rows_per_write` in `policy/runtime.yaml` groups the
+window into writes of about two million rows — one group at 10k and 100k, so those tiers run exactly
+the plan phases 3–6 measured, and twelve groups of two months at 1m. The month filter is pushed into
+every input rather than applied to the result, because a filter on the output of a left join prunes
+nothing underneath it.
+
+**`period_index` is numbered over the whole calendar, never over the group being written.** It is
+the month's position in the 24-month window, and the gaps-and-islands pass that collapses
+consecutive flagged months into one finding is built on it, as are the roll-ups and the
+change-point detectors. Numbered inside a filtered pass it restarts at 1 for every group, and one
+fourteen-month finding becomes fourteen — which is exactly what the first 1m run produced, 181,895
+layer-1 findings against 15,610 planted ones. A test asserts that a store written in groups is
+identical to the store written in one pass.
+
+**A join in the feature build must be an equality.** `04_graph.sql` matched identity clusters with
+`ON d.identifier = e.national_id OR d.identifier = e.iqama_no`. DuckDB cannot hash an `OR` and
+degraded to a nested loop: under a second at 10k, ninety-six seconds at 100k, hours at 1m. Two
+equality joins and a `UNION ALL` give the same answer in under a second.
+
+**The models are fitted on a sample and score everybody.** `autoencoder.max_train_rows` caps the
+rows the network is *trained* on; the sample is drawn from a seeded generator and sorted, so two
+runs fit the same network on the same records. An autoencoder over HR records converges on the
+shape of a normal record, and a hundred and fifty thousand of them describe that shape as well as a
+million do — while a million is 245 optimiser steps an epoch instead of 37. Every employee is still
+scored, in batches, and the matrix stays on the host with only the batch on the device.
+
+**An explanation is built where there is something to explain.** TreeSHAP over a million records
+costs minutes and is read for a few hundred, so `expected_salary.attribution_max_rows` explains the
+widest residuals and `autoencoder.attribution_max_rows` the strangest records; below the cap the
+column is empty. Both caps sit above the 10k population, so phases 3–6 score exactly what they
+scored.
+
+**The matrix is built in Arrow, not in Python.** `build_matrix` used to convert every numeric cell
+through an object array — sixty-six million `float()` calls at 1m — and encode categoricals through
+a dict lookup per row. Both are now one pass in C per column, and a categorical column stays as
+codes plus levels (`LevelColumn`) rather than becoming one string per employee.
+
+**Bundles are assembled a chunk of alerts at a time.** Layer 4 fetches the employee display rows and
+the 24-month timelines for `fusion.bundle_chunk_alerts` alerts, builds their bundles, and moves on,
+so the peak is one chunk rather than 35,000 bundles' worth of denormalised lake. The comparable
+cases each alert points at are resolved once per code instead of once per alert — the same sort
+inside the bundle loop is quadratic, which is invisible at three hundred alerts and is minutes at
+thirty-five thousand.
+
+**Pass 2 reads the lake through a database file.** The generator's injection step materialised every
+table into an in-memory DuckDB; at 1m that is 140 million allowance rows and tens of gigabytes. It
+is now a database file with a buffer budget, deleted when pass 2 ends. Injection also releases the
+working copies of employees it did not edit between injectors — it loads about four candidates for
+every victim it keeps — which is safe by construction: an untouched employee re-reads from the lake
+identically, and the lake is not rewritten until every injector has finished. The 10k lake
+regenerates byte-identical, all 108 files.
+
+### `agg_alerts_by_site_month`
+
+Written by a new `agg` stage to `data/runs/scale=<n>/run_id=<id>/agg_alerts_by_site_month.parquet`,
+cached on the fusion stage's key. `docs/API_CONTRACT.md` serves `/analytics/geo` entirely from it.
+
+- **The grain is (period, site, anomaly code)**, because the endpoint filters by `family` and
+  `anomaly_code` and a site-month total cannot answer those. The total a default frame wants is
+  stored as the row whose `anomaly_code` is `'*'`, carrying the severity mix and the three worst
+  codes, so the default frame is a filter rather than a group-by.
+- **An alert counts in every month of its window**, at the site the employee was at *that* month —
+  an employee who moved takes their exposure with them. Cumulative exposure is spread evenly over
+  the window, so a year of frames adds up to the recovery figure rather than a multiple of it;
+  monthly exposure belongs to the last month of the window, which is the only month it is still
+  going out in.
+- **The denominator is the site's headcount that month**, and `alerts_per_1000` is stored rather
+  than derived (CLAUDE.md: never raw counts).
+- **Suppressed alerts are not on the map.** They stay in `alerts.parquet` — suppression hides, it
+  never deletes — but a frame is a picture of what is open.
+
+### Runs are partitioned by scale
+
+`data/runs/scale=<n>/run_id=<id>/`. The default run id is the last period of the window, which is
+the same string at every tier, so before this a 10k run and a 1m run of the same month wrote their
+alerts over each other — and the second one looked like a successful run of the first.
+
+### The runtime profile
+
+`data/runs/runtime_profile.json` accumulates one entry per scale tier: stage timings, row counts,
+the alert count, the peak resident set sampled while the batch ran, and the lake and policy digest
+it was measured against. Only stages that actually ran are recorded — a cached stage's time is what
+it cost the day it ran, and reporting it as this run's cost would make a tier comparison a lie.
+`docs/EVAL_REPORT.md` section 5 renders it, which is the "runtime profile per stage at each scale
+tier" this spec asks for, and `verify 7` holds the 1m entry to the phase budget rather than spending
+fifteen minutes reproducing it.
 
 ## Evaluation harness (phase 3 onward)
 

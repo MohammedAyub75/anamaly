@@ -20,13 +20,24 @@ WITH periods AS (
            row_number() OVER (ORDER BY period) AS period_index,
            last_day(make_date(period // 100, period % 100, 1)) AS period_end_date,
            make_date(period // 100, period % 100, 1) AS period_start_date
+    -- Over the whole calendar, never over the months this pass happens to be
+    -- writing: `period_index` is the month's position in the 24-month window
+    -- and everything downstream counts on it -- the gaps-and-islands pass that
+    -- collapses consecutive flagged months into one finding, the roll-ups, the
+    -- change-point detectors. Numbering it inside a filtered pass would restart
+    -- it at 1 for every group and turn one fourteen-month finding into fourteen.
     FROM dim_calendar
 ),
 spine AS (
     SELECT e.employee_id, p.*
     FROM employee_master e
     CROSS JOIN periods p
+    -- `$period_filter` is empty for a whole-window build and `AND period IN
+    -- (...)` when the build is writing a few months at a time (phase 7). It is
+    -- applied to every input rather than to the result, because a filter on the
+    -- output of a left join does not prune the scans underneath it.
     WHERE p.period >= year(e.hire_date) * 100 + month(e.hire_date)
+      $period_filter
 ),
 -- The interval in force at the end of the month. ASOF picks the latest
 -- `effective_from` at or before that date, which is exactly the as-at rule.

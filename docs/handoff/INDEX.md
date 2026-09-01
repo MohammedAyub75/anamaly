@@ -16,7 +16,7 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 | 4 | Layer 2 peer stats + expected-salary model + SHAP | ✅ PASSED | `verify 4` — 31/31 checks, 12/12 layer-2 codes at 100% recall, family B precision 99% | 2026-09-01 | `phase-04` |
 | 5 | Layer 3 Isolation Forest + autoencoder + graph checks | ✅ PASSED | `verify 5` — 30/30 checks, 5/5 layer-3 codes at 100% recall and precision, 34/34 codes now have a detector | 2026-09-01 | `phase-05` |
 | 6 | Fusion, severity banding, evidence bundle, financial impact | ✅ PASSED | `verify 6` — 32/32 checks, 353 findings fused into 344 alerts, budget hit exactly (5 CRITICAL / 50 HIGH), 344/344 bundles validated | 2026-09-01 | `phase-06` |
-| 7 | Scale-up 100k → 1M, batch tuning, `agg_alerts_by_site_month` | ⬜ not started | `verify 7` | — | — |
+| 7 | Scale-up 100k → 1M, batch tuning, `agg_alerts_by_site_month` | 🟥 GATE RED | `verify 7` — 26/28; 1m runs correctly at 8.38 GB but takes 38 min against a 15 min budget, 32 of them the feature build | 2026-09-01 | untagged |
 | 8 | Postgres schema + FastAPI backend + auth + audit + geo endpoint | ⬜ not started | `verify 8` | — | — |
 | 9 | Frontend shell: theme tokens, layout, nav, dashboard | ⬜ not started | `verify 9` | — | — |
 | 10 | Triage queue + alert detail + evidence panel + employee 360 | ⬜ not started | `verify 10` | — | — |
@@ -27,15 +27,20 @@ gate, writes a handoff, commits and tags. See `docs/PLAN.md` §9 and the `phase-
 
 ## Next session
 
-Read `CLAUDE.md`, `docs/specs/detector.md`, `docs/handoff/PHASE_06.md`. Implement phase 7 — scale-up
-to 1M plus `agg_alerts_by_site_month`. First command:
+Read `CLAUDE.md`, `docs/specs/api.md`, `docs/handoff/PHASE_07.md`. Implement phase 8 — the Postgres
+schema, the FastAPI backend, auth, audit and the geo endpoint. First command:
 
 ```
-python tasks.py verify 6
+python tasks.py verify 7
 ```
 
-(confirms the feature store, all four layers, the evidence schema and the harness are intact before
-anything is asked to run a hundred times bigger). The detector is now complete end to end at 10k:
-34 codes, four layers, one ranked and validated queue. What is untested is size — the autoencoder is
-`O(rows x epochs)` and bundle assembly is per-alert Python, and both are about to meet a million
-employees and 24 million payroll rows against a 15-minute, 12 GB budget.
+**Phase 7's gate is red and phase 8 does not wait on it.** The detector works at a million
+employees: 33,355 alerts, 500 CRITICAL and 5,000 HIGH exactly, every one of the 34 codes still
+found, every bundle validated, 8.38 GB peak against a 12 GB budget, and the map's 24 frames written
+and reconciled to the riyal. What it does not do is fit in fifteen minutes — a cold run is
+38, and 32 of those are rebuilding a 24-million-row, 168-column feature table that is rebuilt in
+full whenever the lake changes. Detection itself, over a built store, is 5.8 minutes. Closing the
+gap needs an incremental feature build or a narrower wide table, both of which change the phase-3
+contract; `docs/handoff/PHASE_07.md` sets out the options. Everything phase 8 reads —
+`alerts.parquet` and `agg_alerts_by_site_month.parquet`, under
+`data/runs/scale=<n>/run_id=<id>/` — exists at all three tiers.
